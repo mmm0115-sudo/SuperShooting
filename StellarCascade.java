@@ -884,7 +884,11 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     int ox=(ww-dw)/2, oy=(wh-dh)/2;
     g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
     g2.drawImage(frameBuf, ox,oy,dw,dh, null);
+    // FPS計測
+    long pn=System.nanoTime(); paintCount++;
+    if(pn-fpsT>=1_000_000_000L){ fps=paintCount; paintCount=0; fpsT=pn; }
   }
+  int paintCount, fps; long fpsT;
   Color letterboxColor(){ return hsb(bgHueFor(),0.5,0.04); }
 
   void renderGame(Graphics2D g2){
@@ -918,27 +922,36 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(flash>0){ g2.setColor(new Color(255,255,255,(int)(flash*150))); g2.fillRect(0,0,VW,H); }
   }
 
-  void drawBackground(Graphics2D g2,int idx){
+  // 背景（グラデ＋星雲）はステージ毎に1回だけ生成してキャッシュ→毎フレームは転送のみ
+  final HashMap<Integer,BufferedImage> bgCache = new HashMap<>();
+  BufferedImage buildBg(int idx){
     double hue = (idx>=0&&idx<STAGE_INFO.length)?STAGE_INFO[idx].bg:220;
-    GradientPaint gp=new GradientPaint(0,0,hsb(hue,0.6,0.08), 0,H,hsb((hue+60)%360,0.6,0.10));
-    g2.setPaint(gp); g2.fillRect(0,0,VW,H);
+    BufferedImage img=new BufferedImage(VW,H,BufferedImage.TYPE_INT_RGB);
+    Graphics2D g=img.createGraphics();
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+    g.setPaint(new GradientPaint(0,0,hsb(hue,0.6,0.08), 0,H,hsb((hue+60)%360,0.6,0.10)));
+    g.fillRect(0,0,VW,H);
+    g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.10f));
+    for(int i=0;i<4;i++){
+      double cx=(0.12+i*0.26)*VW, cy=(0.12+i*0.27)*H;
+      RadialGradientPaint rp=new RadialGradientPaint(new Point2D.Double(cx,cy),230,
+        new float[]{0f,1f}, new Color[]{hsb((hue+i*40)%360,0.7,0.5), new Color(0,0,0,0)});
+      g.setPaint(rp); g.fillRect((int)(cx-230),(int)(cy-230),460,460);
+    }
+    g.dispose();
+    return img;
+  }
+  void drawBackground(Graphics2D g2,int idx){
+    BufferedImage bg=bgCache.get(idx);
+    if(bg==null){ bg=buildBg(idx); bgCache.put(idx,bg); }
+    g2.drawImage(bg,0,0,null);
+    double hue=(idx>=0&&idx<STAGE_INFO.length)?STAGE_INFO[idx].bg:220;
     for(Star st:stars){
       st.y += st.z*(1.4+idx*0.15);
       if(st.y>H){ st.y=-2; st.x=Math.random()*VW; }
       g2.setColor(hsba((hue+200)%360,0.4,0.6+st.z*0.15,(int)(120+st.z*60)));
       g2.fillRect((int)st.x,(int)st.y,(int)st.s,(int)(st.s+st.z*1.5));
     }
-    // 星雲
-    Composite oc=g2.getComposite();
-    g2.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.07f));
-    for(int i=0;i<3;i++){
-      double cx=(Math.sin(frame*0.001+i*2)*0.5+0.5)*VW;
-      double cy=((frame*0.2+i*300)%(H+200))-100;
-      RadialGradientPaint rp=new RadialGradientPaint(new Point2D.Double(cx,cy),200,
-        new float[]{0f,1f}, new Color[]{hsb((hue+i*40)%360,0.7,0.5), new Color(0,0,0,0)});
-      g2.setPaint(rp); g2.fillRect((int)(cx-200),(int)(cy-200),400,400);
-    }
-    g2.setComposite(oc);
   }
   // プレイフィールドの枠（サイドバーとの境界）
   void drawPlayfieldFrame(Graphics2D g2){
@@ -1214,7 +1227,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     g2.setColor(new Color(120,160,210)); g2.drawString(STAGE_INFO[stageIndex].sub,sx,H-72);
     g2.drawString("DIFFICULTY  "+diff().name,sx,H-48);
     g2.drawString(CHARS[charSel].name+" / "+SHOT_NAMES[shotSel].trim().split("\\s+")[0],sx,H-28);
-    if(sound.muted){ g2.setColor(new Color(255,136,136)); g2.drawString("MUTE (M)",sx,H-8); }
+    g2.setColor(fps>=55?new Color(120,200,140):fps>=40?new Color(220,200,120):new Color(230,120,120));
+    g2.drawString("FPS "+fps+(sound.muted?"   MUTE(M)":""),sx,H-8);
   }
   void drawSpellDeclare(Graphics2D g2,Boss b){
     double tt=1 - b.declTimer/80.0;            // 0→1
