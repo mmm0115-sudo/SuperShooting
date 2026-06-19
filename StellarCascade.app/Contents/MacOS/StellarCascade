@@ -9,4 +9,4 @@ for c in /usr/bin/java "$JAVA_HOME/bin/java" "$(/usr/libexec/java_home 2>/dev/nu
 done
 [ -z "$JAVA" ] && JAVA="java"
 
-exec "$JAVA" -Xdock:name="Stellar Cascade" -Dsun.java2d.metal=true -jar "$DIR/StellarCascade.jar"
+exec "$JAVA" -Xdock:name="灯火回廊" -Dsun.java2d.metal=true -jar "$DIR/StellarCascade.jar"

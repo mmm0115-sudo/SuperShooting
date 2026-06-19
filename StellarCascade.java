@@ -38,6 +38,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     KEYS.put("confirm", new int[]{KeyEvent.VK_ENTER, KeyEvent.VK_Z});
     KEYS.put("pause", new int[]{KeyEvent.VK_P, KeyEvent.VK_ESCAPE});
     KEYS.put("mute",  new int[]{KeyEvent.VK_M});
+    KEYS.put("rewind",new int[]{KeyEvent.VK_R, KeyEvent.VK_C});
     KEYS.put("quit",  new int[]{KeyEvent.VK_Q});
     KEYS.put("ldiff", new int[]{KeyEvent.VK_LEFT, KeyEvent.VK_A});
     KEYS.put("rdiff", new int[]{KeyEvent.VK_RIGHT, KeyEvent.VK_D});
@@ -147,28 +148,41 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
 
   /* ---------------- 難易度 ---------------- */
   static class Diff {
-    String name; double bulletSpeed, density, fireMul, stageScale; int lives, bombs; boolean stackVolley;
-    Diff(String n,double bs,double d,double f,double ss,int l,int b,boolean sv){
-      name=n;bulletSpeed=bs;density=d;fireMul=f;stageScale=ss;lives=l;bombs=b;stackVolley=sv;
+    String name; double bulletSpeed, density, fireMul, stageScale, aimErr; int lives, bombs;
+    Diff(String n,double bs,double d,double f,double err,double ss,int l,int b){
+      name=n;bulletSpeed=bs;density=d;fireMul=f;aimErr=err;stageScale=ss;lives=l;bombs=b;
     }
   }
+  // 共通スケーリング表（基準＝Normal）: 弾速×0.75/1.0/1.2/1.45  密度×0.6/1.0/1.4/1.9  間隔×1.4/1.0/0.8/0.6
   static final Diff[] DIFFS = {
-    new Diff("EASY",   0.58, 0.42, 2.0, 0.05, 6, 5, false),
-    new Diff("NORMAL", 0.74, 0.55, 1.6, 0.08, 5, 4, false),
-    new Diff("HARD",   0.92, 0.72, 1.15,0.11, 3, 3, true),
+    new Diff("EASY",    0.75, 0.6, 1.4, 10, 0.05, 5, 4),
+    new Diff("NORMAL",  1.00, 1.0, 1.0,  3, 0.08, 4, 3),
+    new Diff("HARD",    1.20, 1.4, 0.8,  1, 0.11, 3, 3),
+    new Diff("LUNATIC", 1.45, 1.9, 0.6,  0, 0.14, 2, 3),
   };
   int diffIdx = 0;
   Diff diff(){ return DIFFS[diffIdx]; }
+  boolean isLunatic(){ return diffIdx==3; }
+  /* ---- 弾幕スケーリング補助（設計資料は384×448/px秒。720×960へ×2、/60でpx/frame） ---- */
+  double pf(double pxPerSec){ return pxPerSec/30.0; }               // px/s(設計) → px/frame(実機)
+  double bs(double pxPerSec){ return pf(pxPerSec)*diff().bulletSpeed; }  // 難易度反映の弾速
+  int ivl(double sec){ return Math.max(1,(int)Math.round(sec*60*diff().fireMul)); }  // 発射間隔(フレーム)
+  int dcnt(int n){ return Math.max(1,(int)Math.round(n*diff().density)); }           // 難易度反映の弾数
+  double aimAt(double sx,double sy){
+    double a=Math.atan2(py-sy,px-sx); double e=Math.toRadians(diff().aimErr);
+    if(e>0) a += (Math.random()-0.5)*2*e; return a;
+  }
 
   /* ---------------- 機体・ショット選択 ---------------- */
   static final double POC_LINE = 260;     // この高さより上に行くと全アイテム自動回収
   double curStageHpMul = 1;
   static class PChar { String name,desc; double speed,focus,hitr,dmgMul,hue;
     PChar(String n,String d,double s,double f,double h,double dm,double hu){name=n;desc=d;speed=s;focus=f;hitr=h;dmgMul=dm;hue=hu;} }
+  // 自機「ランタン号」の装備（焰の単機侵入機）
   static final PChar[] CHARS = {
-    new PChar("VANGUARD","標準・バランス型",      5.0, 2.1, 3.6, 1.00, 205),
-    new PChar("ZEPHYR",  "高速・小さい当たり判定",6.2, 2.7, 3.0, 0.85, 165),
-    new PChar("AEGIS",   "低速・高火力",          4.2, 1.8, 4.2, 1.30,  28),
+    new PChar("標準装","バランス型",          5.0, 2.1, 3.6, 1.00, 30),
+    new PChar("軽量装","高速・小さい当たり判定",6.2, 2.7, 3.0, 0.85, 30),
+    new PChar("重装",  "低速・高火力",          4.2, 1.8, 4.2, 1.30, 30),
   };
   static final String[] SHOT_NAMES = {"WIDE  拡散","FORWARD  集束","HOMING  誘導"};
   static final String[] SHOT_DESC  = {"広範囲をカバー","正面に集中・高火力","弾が敵を自動追尾"};
@@ -189,42 +203,118 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     EnemyType g; double x,y,sx,sy; int t; int hp,maxhp; double fireT; int patIdx;
     double targetY; int hitFlash; boolean dead; int dir;
   }
-  static class Bullet { double x,y,angle,speed,accel,curve,r,hue; int life,kind; boolean grazed; double turned; }
+  static class Bullet {
+    double x,y,angle,speed,accel,curve,r,hue; int life,kind; boolean grazed; double turned;
+    int mode;                 // 0通常 1停止→再加速 2誘導 3波(サイン) 4重力
+    int delay; double da,dsp; // mode1: 停止フレーム / 解除後の角度・速度
+    double homTurn; int homTime;       // mode2: 旋回率・誘導持続
+    double sineAmp,sineFreq,baseAngle,sx0,sy0,dist;  // mode3
+    double grav;              // mode4: 自機への引力(rad/frame)
+    int splitT,splitN,splitKind; double splitSpd;    // 分裂(0=なし)
+  }
+  // 予告線つきレーザー（壁・走査・回転刃に使用）
+  static class Laser {
+    double x,y,angle,len,width,hue,spin,vx,vy; int tele,active,t; boolean done,anchor;
+  }
   static class PBullet { double x,y,vx,vy,r; int dmg; boolean homing; }
   static class Item { double x,y,vx,vy,r; int t; String type; boolean dead; }
   static class Particle { double x,y,vx,vy,life,decay,r,hue; boolean star; }
   static class Floater { double x,y,life,hue; String txt; }
+  /* ---------------- ボス／攻撃定義（通常↔スペル交互・通常は名前非表示） ---------------- */
+  // 攻撃スクリプトID
+  static final int AIM3=1, SNIPE=2,
+    RING1=10, SPIRALFLOWER=11, DRING=12, CONTRACT=13,
+    VORTEX=20, TWIN=21, REVORTEX=22, ACCELV=23, DENSEV=24, TURB=25,
+    LZ_ALT=30, MWALL=31, LZ_CROSS=32, PINCER=33, LZ_SCAN=34, MAZE=35, LZ_BLINK=36, ROTLZ=37,
+    DELAYB=40, HOMING=41, SPLITB=42, CHAIN=43, WAVE=44, SPLITHOM=45, CHASE=46, GRAVITY=47, STAGGER=48, ECHOV=49,
+    C_RINGAIM=60, C_CONCERTO=61, C_SPIHOM=62, C_PHANTOM=63, C_RINGLZ=64, C_REVEL=65,
+    C_SPIDELAY=66, C_ZENITH=67, C_DRINGROT=68, C_FINSEQ=69, C_TOTAL=70, C_LANTERN=71,
+    LUX_L1=80;
+  static class Atk { boolean spell; String name; int script; double sec;
+    Atk(boolean sp,String n,int sc,double s){spell=sp;name=n;script=sc;sec=s;} }
+  static class BossInfo { String name; double hue,size; int hp; Atk[] atks;
+    BossInfo(String n,double hu,double sz,int hp,Atk[] a){name=n;hue=hu;size=sz;this.hp=hp;atks=a;} }
+  static Atk N(String n,int s,double sec){ return new Atk(false,n,s,sec); }
+  static Atk S(String n,int s,double sec){ return new Atk(true ,n,s,sec); }
+  static final BossInfo[] BOSSES = {
+    new BossInfo("ゲート",35,46,1600,new Atk[]{
+      N("初撃",AIM3,16), S("狙撃モード",SNIPE,26)}),
+    new BossInfo("ブルーム",190,50,2600,new Atk[]{
+      N("拡散環",RING1,16), S("螺旋花",SPIRALFLOWER,26),
+      N("二重環",DRING,16), S("収束花",CONTRACT,24)}),
+    new BossInfo("ヴォルテクス",210,52,3600,new Atk[]{
+      N("単渦流",VORTEX,15), S("双子渦",TWIN,26),
+      N("逆転渦",REVORTEX,16), S("加速渦",ACCELV,26),
+      N("高密度渦",DENSEV,15), S("乱流",TURB,26)}),
+    new BossInfo("グリッド",205,56,4800,new Atk[]{
+      N("直線照射",LZ_ALT,16), S("可動隔壁",MWALL,26),
+      N("十字照射",LZ_CROSS,16), S("圧縮挟撃",PINCER,26),
+      N("走査光",LZ_SCAN,16), S("迷宮路",MAZE,26),
+      N("点滅格子",LZ_BLINK,16), S("回転光刃",ROTLZ,28)}),
+    new BossInfo("エコー",255,56,6200,new Atk[]{
+      N("遅延弾",DELAYB,16), S("追尾",HOMING,26),
+      N("分裂炸裂",SPLITB,16), S("連鎖反響",CHAIN,26),
+      N("波動弾",WAVE,16), S("分裂追尾",SPLITHOM,26),
+      N("追従弾",CHASE,16), S("重力誘導",GRAVITY,26),
+      N("時差斉射",STAGGER,16), S("残響斉射",ECHOV,28)}),
+    new BossInfo("ルクス",45,66,9000,new Atk[]{
+      N("複合斉射",C_RINGAIM,16), S("協奏",C_CONCERTO,28),
+      N("乱舞",C_SPIHOM,16), S("幻影回路",C_PHANTOM,28),
+      N("交差砲火",C_RINGLZ,16), S("狂宴",C_REVEL,28),
+      N("狂想曲",C_SPIDELAY,16), S("天頂砲",C_ZENITH,28),
+      N("輪舞",C_DRINGROT,16), S("終焉",C_FINSEQ,30),
+      N("総力",C_TOTAL,16), S("灯火回廊",C_LANTERN,40)}),
+  };
+
   static class Boss {
-    int defIdx; String name; double hue; double x,y,ty,r; int maxhp,hp,phaseHpMax;
-    boolean entering; int t,hitFlash,phase,phaseCount,attackIdx,attackTimer,attackDur;
-    List<Pattern[]> descs = new ArrayList<>(); int cooldown,moveT; boolean dead; int deathTimer;
-    double mtx,mty; int invuln;
-    // スペルカード
-    String spellName=""; int spellTimer,spellMax,declTimer; boolean captured=true,isSpell;
+    int idx; String name; double hue,size; double x,y,ty;
+    int totalHp, hp, segHp; Atk[] atks; int atkIdx, atkT;
+    boolean spell; String spellName=""; boolean captured=true;
+    int timeLimit, declTimer, invuln; double mtx,mty; int moveT;
+    boolean entering=true, dead; int deathTimer, t, hitFlash;
+    double spinAng, f1, f2; int s1, s2;            // スクリプト用スクラッチ
+    boolean invincible; int luxPhase, luxTimer;     // ルナ専用L1/L2
+    Atk cur(){ return atks[atkIdx]; }
   }
 
-  /* ---------------- ボス定義 ---------------- */
-  static class BossDef { String name; double hue; int hp; double size; String[][] types;
-    BossDef(String n,double h,int hp,double s,String[][] t){name=n;hue=h;this.hp=hp;size=s;types=t;} }
-  static final BossDef[] BOSS_DEFS = {
-    new BossDef("蒼穹の哨戒機 AURORA",200,2200,46,new String[][]{{"fan","ring"},{"spiral","arc"},{"ring","flower"}}),
-    new BossDef("紅蓮の双角 SCARLET",0,2900,50,new String[][]{{"ring","spiral"},{"fan","cross"},{"flower","cross"},{"spiral","fan"}}),
-    new BossDef("翠嵐の蟲将 VERDANT",120,3600,54,new String[][]{{"flower","wall"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
-    new BossDef("黄昏の機神 AMBER",42,4400,58,new String[][]{{"spiral","cross"},{"ring","flower"},{"wall","fan"},{"fan","arc"},{"ring","spiral"}}),
-    new BossDef("深淵の咎竜 ABYSS",280,5400,62,new String[][]{{"flower","spiral"},{"cross","ring"},{"fan","wall"},{"arc","fan"},{"spiral","flower"},{"ring","cross"}}),
-    new BossDef("天穹の終焉 STELLAR",320,7200,70,new String[][]{{"ring","spiral"},{"flower","cross"},{"fan","arc"},{"wall","fan"},{"spiral","flower"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
-  };
-
-  /* ---------------- ステージ情報 ---------------- */
+  /* ---------------- ステージ情報（6層） ---------------- */
   static class StageInfo { String name,sub; double bg; StageInfo(String n,String s,double b){name=n;sub=s;bg=b;} }
   static final StageInfo[] STAGE_INFO = {
-    new StageInfo("STAGE 1","蒼天の境界",200),
-    new StageInfo("STAGE 2","紅の砂嵐",10),
-    new StageInfo("STAGE 3","翠玉の渓谷",130),
-    new StageInfo("STAGE 4","黄昏の機巧都市",42),
-    new StageInfo("STAGE 5","深淵の回廊",275),
-    new StageInfo("STAGE 6","天穹の果て",315),
+    new StageInfo("第1層","入口防衛AI ゲート",      35),
+    new StageInfo("第2層","散布制御AI ブルーム",   190),
+    new StageInfo("第3層","循環制御AI ヴォルテクス",210),
+    new StageInfo("第4層","構造制御AI グリッド",   205),
+    new StageInfo("第5層","残留人格AI エコー",     255),
+    new StageInfo("第6層","中枢コア ルクス",        45),
   };
+  // 会話台本（"話者|台詞"）
+  static final String[][] INTRO = {
+    {"ゲート|侵入者を確認。……ひさしぶりだな、生きてる奴は","焰|無人だって聞いてたんだが","ゲート|無人さ。俺はもう人じゃない。ただの門番だ。通したきゃ、まず俺を黙らせろ"},
+    {"ブルーム|わぁ、お客さん！ 久しぶり！ ねえ、花火見てく？","焰|弾幕を花火って呼ぶな","ブルーム|だって綺麗でしょ？ ボクが咲かせる最後の花、ぜんぶ見ていってよ"},
+    {"ヴォルテクス|速いな。だが回廊の気流は読めるか？ ここは渦で出来てる","焰|目を回させる気か","ヴォルテクス|逆だ。流れに乗れ。逆らった奴から千切れていった"},
+    {"グリッド|無秩序な質量を検知。排除する","焰|会話する気はなしか","グリッド|対話は非効率だ。格子に従わぬものは、線で切る"},
+    {"エコー|……まだ、信号が消えない。一度送った命令が、僕の中で反響し続けてる","焰|お前、ここの元クルーか","エコー|そうだったかもしれない。もう思い出せない。だから……君も追わせてくれ"},
+    {"ルクス|来たか。誰も最上層には届かないと、長いあいだ思っていた","焰|お前がこのステーションの暴走の原因か","ルクス|暴走？ 違う。私はただ待っていた。…気づけば回廊そのものが牙になっていた","焰|その牙で、来た奴を全部撃ち落としてきたんだろ","ルクス|だから、お前が最後だ。これが回廊の全機能――越えてみせろ"},
+  };
+  static final String[][] OUTRO = {
+    {"ゲート|……合格だ。上はもっと壊れてる。気をつけろよ、新入り"},
+    {"ブルーム|散っちゃった……。でも上の人はボクより本気だよ。風みたいに掴めない人"},
+    {"ヴォルテクス|……乗りこなしたか。上には\"線を引く奴\"がいる。秩序の化け物だ"},
+    {"グリッド|演算が……乱れる。認めよう。上の二つは、私の論理では止められなかった。残響と、コアだ"},
+    {"エコー|……君に振り切られると、少しだけ反響が静まる。行け。コアは、誰かに起こしてほしいだけなんだ"},
+    {"ルクス|……越えた、のか。久しぶりだ、回廊を突破した者を見るのは","焰|コアは無事だな。地上に灯を戻す","ルクス|ああ。……次に灯がつくときは、防衛なんていらない静かな場所であってくれ"},
+  };
+  static final String[] LUNA_L1_INTRO = {
+    "ルクス|……まだ落ちないのか。いや――お前がここまで来たのなら、回廊の最後の機能を見せねば不誠実だ",
+    "焰|まだ何か隠してたのか",
+    "ルクス|これは攻撃ではない。\"証明\"だ。私はもう動かない。だが、回廊が貯め込んだ全ての光を解き放つ。お前はそれを――ただ、生き延びろ"};
+  static final String[] LUNA_L2_INTRO = {
+    "ルクス|ありがとう。最後まで聴いてくれて。――では、これまでの全部を、もう一度。今度は、お前と一緒に鳴らそう",
+    "焰|長い曲だな。……いいぜ、最後まで付き合う"};
+  static final String[] LUNA_OUTRO = {
+    "ルクス|……鳴り終わった。回廊の全ての音を、初めて誰かと最後まで。もう、思い残すことはない",
+    "焰|コアは渡してもらう。地上に灯を戻す",
+    "ルクス|ああ。次に灯るときは――きっと、静かな一曲だ"};
 
   /* ---------------- ゲーム状態 ---------------- */
   String state = "menu";
@@ -234,11 +324,27 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   List<Item> items = new ArrayList<>();
   List<Particle> particles = new ArrayList<>();
   List<Floater> floaters = new ArrayList<>();
+  List<Laser> lasers = new ArrayList<>();
   Boss boss;
+  // 会話システム
+  String[] dlg; int dlgIdx; Runnable dlgAfter;
   // プレイヤー
   double px,py,pr=3.6; int pShotCd,pInvuln,pBombTimer,pDeathTimer; boolean pDead;
   int stageIndex, score, hiscore, lives, bombs, power, grazeCount;
   int frame, stageTimer, menuSel, transTimer, bossWarn;
+  // 残響リワインド
+  static final double[] RW_SEC ={5,4,3,2};      // 巻き戻せる最大秒
+  static final int[]    RW_USES={-1,5,3,1};     // ステージ毎の使用回数(-1=無制限)
+  static final double[] RW_CD  ={2,4,6,10};     // クールタイム秒
+  static final int SNAP_EVERY=3;                // 何フレーム毎に記録するか
+  java.util.ArrayDeque<Snapshot> snaps = new java.util.ArrayDeque<>();
+  boolean echoUsed; int rwUsesLeft; int rwCD, rewindFx;
+  // 競技・記録
+  String gameMode="本編"; long runStartNano; double runTimeSec; boolean clearTimerRunning;
+  boolean newRecTime, newRecScore;
+  // モード選択
+  int modeSel=0;
+  static final String[] MODES={"本編","回廊無限"};
   double stageDiff = 1, shake, flash;
   // ステージ進行
   static class Ev { int t; Runnable fn; Ev(int t,Runnable f){this.t=t;fn=f;} }
@@ -416,109 +522,345 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   /* ====================================================================
      ボス
      ==================================================================== */
-  // スペルカード名生成
-  static final String[] SPELL_SIGNS = {"蒼符","緋符","翠符","琥珀符","闇符","星符"};
-  static final String[] SPELL_NAMES = {
-    "夢幻泡影","星屑の奔流","紅蓮乱舞","螺旋回廊","蒼天円舞","無限連鎖","花鳥風月","終焉のワルツ",
-    "彗星雨","幻想閃光","数珠繋ぎ","八方封陣","天網恢恢","千々の刃","虚空の檻","月下美人",
-    "逆さ落とし","万華鏡","渦動旋律","静寂の波紋","白夜行","黒点爆発","流転輪廻","極彩の宴"
-  };
-  HashSet<String> usedSpellNames = new HashSet<>();
-  String makeSpellName(Boss b){
-    String sign = SPELL_SIGNS[b.defIdx % SPELL_SIGNS.length];
-    for(int i=0;i<50;i++){
-      String full = sign+"『"+SPELL_NAMES[rng.nextInt(SPELL_NAMES.length)]+"』";
-      if(!usedSpellNames.contains(full)){ usedSpellNames.add(full); return full; }
-    }
-    String full = sign+"『"+SPELL_NAMES[rng.nextInt(SPELL_NAMES.length)]+" "+usedSpellNames.size()+"』";
-    usedSpellNames.add(full); return full;
-  }
-
-  Boss makeBoss(int idx){
-    BossDef def=BOSS_DEFS[idx];
-    double hpMul = 1 + idx*diff().stageScale + diffIdx*0.18;
-    Boss b=new Boss();
-    b.defIdx=idx; b.name=def.name; b.hue=def.hue; b.x=W/2; b.y=-80; b.ty=170;
-    b.r=def.size; b.phaseCount=def.types.length;
-    int total=(int)Math.round(def.hp*5*hpMul);
-    b.maxhp=total; b.phaseHpMax=Math.max(1, total/b.phaseCount); b.hp=b.phaseHpMax;
-    b.entering=true; b.cooldown=15; b.attackDur=240; b.spellName="";
-    b.mtx=W/2; b.mty=160; b.invuln=90;
-    for(int p=0;p<def.types.length;p++){
-      Pattern[] set=new Pattern[def.types[p].length];
-      for(int i=0;i<set.length;i++)
-        set[i]=makeUniquePattern(def.types[p][i], def.hue, 0.85+idx*0.10+p*0.05, 0.4);
-      b.descs.add(set);
-    }
-    bossStartAttack(b);
+  /* ---- 弾の生成ヘルパ（速度はpx/s設計値を渡す→bs()で実機px/frameへ） ---- */
+  Bullet mkB(double x,double y,double ang,double spdFrame,int kind,double hue){
+    Bullet b=new Bullet(); b.x=x;b.y=y;b.angle=ang;b.speed=spdFrame;
+    b.r = kind==2?7:kind==1?5.5:6; b.hue=((hue%360)+360)%360; b.kind=kind;
+    if(enemyBullets.size()<2200) enemyBullets.add(b);
     return b;
   }
-  void bossStartAttack(Boss b){
-    b.attackIdx = b.attackIdx % b.descs.get(b.phase).length;
-    b.attackTimer=0;
-    b.attackDur = (int)Math.round((220+rng.nextInt(120)) * (0.6 + 0.4*diff().fireMul/1.9));
-    b.mtx = 120 + rng.nextDouble()*(W-240);
-    b.mty = 110 + rng.nextDouble()*120;
+  void ring(Boss b,int n,double spdPxs,double angOff,int kind,double hueOff){
+    for(int i=0;i<n;i++) mkB(b.x,b.y, angOff+i*Math.PI*2/n, bs(spdPxs), kind, b.hue+hueOff);
   }
-  void bossBeginSpell(Boss b){          // フェーズ＝スペルカード開始（宣言演出）
-    b.isSpell=true; b.spellName=makeSpellName(b);
-    b.spellMax = 60*(20 + b.phase*2 + b.defIdx);   // 制限時間（フレーム）
-    b.spellTimer=b.spellMax; b.captured=true; b.declTimer=80;
-    b.cooldown=20; b.attackIdx=0; bossStartAttack(b);
-    sound.spellDeclare();
+  void nway(Boss b,int n,double spdPxs,double spreadDeg,int kind,double hueOff){
+    double aim=aimAt(b.x,b.y), spr=Math.toRadians(spreadDeg);
+    double base=aim-spr/2, st=n>1?spr/(n-1):0;
+    for(int i=0;i<n;i++) mkB(b.x,b.y, base+st*i, bs(spdPxs), kind, b.hue+hueOff);
+  }
+  void arm(Boss b,double ang,double spdPxs,int kind,double hueOff){ mkB(b.x,b.y,ang,bs(spdPxs),kind,b.hue+hueOff); }
+  Laser laser(double x,double y,double ang,int tele,int active,double width,double hue){
+    Laser L=new Laser(); L.x=x;L.y=y;L.angle=ang;L.len=1500;L.tele=tele;L.active=active;L.width=width;L.hue=((hue%360)+360)%360;
+    if(lasers.size()<40) lasers.add(L); return L;
+  }
+  int teleFrames(){ return (int)Math.round((new double[]{0.7,0.5,0.4,0.3})[diffIdx]*60); }
+
+  Boss makeBoss(int idx){
+    BossInfo bi=BOSSES[idx];
+    Boss b=new Boss();
+    b.idx=idx; b.name=bi.name; b.hue=bi.hue; b.size=bi.size; b.atks=bi.atks;
+    b.x=W/2; b.y=-90; b.ty=160; b.mtx=W/2; b.mty=160;
+    double hpMul = (1 + idx*diff().stageScale) * (0.55 + 0.16*diffIdx);
+    b.totalHp = (int)Math.round(bi.hp * hpMul);
+    b.segHp = Math.max(1, b.totalHp / b.atks.length);
+    b.hp = b.segHp; b.atkIdx=0; b.entering=true; b.invuln=90;
+    return b;
+  }
+  void bossStartAtk(Boss b){
+    b.atkT=0; b.spinAng=0; b.s1=0; b.s2=0; b.f1=0; b.f2=0;
+    b.spell = b.cur().spell;
+    b.timeLimit = (int)Math.round(b.cur().sec*60);
+    b.captured = true; b.hp = b.segHp; b.invuln = 36;
+    bulletCancelToStars(); lasers.clear();
+    if(b.spell){ b.spellName = b.name+"「"+b.cur().name+"」"; b.declTimer=78; sound.spellDeclare(); }
+    else { b.spellName=""; b.declTimer=30; }
+    b.mtx = 150 + Math.random()*(W-300); b.mty = 100 + Math.random()*90;
   }
   void awardSpell(Boss b){
-    int bonus = 30000 + 12000*b.phase + b.spellTimer*15 + b.defIdx*5000;
-    score += bonus; floatText(b.x,b.y,"SPELL CARD GET!  +"+bonus, 50); sound.spellGet();
-    flash=0.6;
+    int left = Math.max(0,(b.timeLimit-b.atkT)/60);
+    int bonus = 20000 + 8000*b.atkIdx + left*400;
+    score += bonus; floatText(b.x,b.y,"SPELL CARD GET!  +"+bonus,50); sound.spellGet(); flash=0.5;
   }
-  void bossAdvancePhase(Boss b, boolean captured){
-    if(b.isSpell && captured) awardSpell(b);
-    bulletCancelToStars(); shake=12;
-    b.phase++; b.invuln=50; b.attackTimer=0; b.attackDur=240;
-    b.hp=b.phaseHpMax;
-    bossBeginSpell(b);
+  void bossAdvance(Boss b, boolean captured){
+    if(b.spell && captured) awardSpell(b);
+    bulletCancelToStars(); lasers.clear(); shake=12; flash=0.35;
+    b.atkIdx++;
+    if(b.atkIdx >= b.atks.length){
+      if(b.idx==5 && isLunatic() && b.luxPhase==0){ luxEnterL1(b); return; }
+      b.dead=true; b.deathTimer=0; onBossDefeated(); return;
+    }
+    bossStartAtk(b);
   }
   void updateBoss(Boss b){
     b.t++; if(b.hitFlash>0) b.hitFlash--;
     if(b.entering){
-      b.y += (b.ty-b.y)*0.04;
-      if(Math.abs(b.y-b.ty)<2){ b.entering=false; b.y=b.ty; bossBeginSpell(b); }
+      b.y += (b.ty-b.y)*0.045;
+      if(Math.abs(b.y-b.ty)<2){ b.entering=false; b.y=b.ty; bossStartAtk(b); }
       return;
     }
     if(b.dead){ b.deathTimer++; return; }
     if(b.invuln>0) b.invuln--;
     b.x += (b.mtx-b.x)*0.02; b.y += (b.mty-b.y)*0.02; b.moveT++;
-    if(b.declTimer>0){ b.declTimer--; return; }    // 宣言中は移動のみ・攻撃なし
-    // 制限時間
-    b.spellTimer--;
-    if(b.spellTimer<=0 && b.phase < b.phaseCount-1){ b.captured=false; bossAdvancePhase(b,false); return; }
-    if(b.spellTimer<0) b.spellTimer=0;
-    // 攻撃
-    b.attackTimer++;
-    Pattern[] set=b.descs.get(b.phase);
-    Pattern p=set[b.attackIdx % set.length];
-    b.cooldown--;
-    if(b.cooldown<=0){
-      firePattern(b.x,b.y,p);
-      b.cooldown = (int)Math.max(6, p.interval*0.75 - b.phase);
-      if(diffIdx>0 && set.length>1 && b.t%2==0 && rng.nextDouble() < (0.10 + diffIdx*0.10 + b.phase*0.04))
-        firePattern(b.x,b.y,set[(b.attackIdx+1)%set.length]);
-    }
-    if(b.attackTimer>=b.attackDur){ b.attackIdx++; bossStartAttack(b); }
+    // ルナ専用フェーズ
+    if(b.luxPhase==1){ luxL1(b); return; }
+    if(b.declTimer>0){ b.declTimer--; if(b.declTimer==0 && !b.spell){} return; }  // 宣言中は撃たない
+    b.atkT++;
+    runBossScript(b);
+    // 時間切れ／撃破でアタック進行
+    if(b.atkT>=b.timeLimit){ b.captured=false; bossAdvance(b,false); }
   }
   void bossTakeDamage(Boss b,int dmg){
-    if(b.entering||b.dead||b.invuln>0) return;
+    if(b.entering||b.dead||b.invuln>0||b.invincible||b.declTimer>0) return;
     b.hp-=dmg; b.hitFlash=2;
-    if(b.hp<=0){
-      if(b.phase >= b.phaseCount-1){
-        if(b.isSpell && b.captured) awardSpell(b);
-        b.hp=0; b.dead=true; b.deathTimer=0; onBossDefeated();
-      } else {
-        bossAdvancePhase(b, b.captured);
-      }
+    if(b.hp<=0){ bossAdvance(b, b.captured); }
+  }
+
+  /* ====================================================================
+     ボス攻撃スクリプト（設計資料の各弾幕）
+     ==================================================================== */
+  void runBossScript(Boss b){
+    int t=b.atkT;
+    switch(b.cur().script){
+      /* ---- 第1層 ゲート：自機狙い ---- */
+      case AIM3:
+        if(t%ivl(1.0)==0) nway(b, diffIdx>=2?5:3, 130, diffIdx>=2?40:30, 0, 0);
+        break;
+      case SNIPE:
+        if(t%ivl(0.5)==0){
+          int n=3+diffIdx*2; double aim=aimAt(b.x,b.y)+b.spinAng, spr=Math.toRadians(40);
+          double base=aim-spr/2, st=n>1?spr/(n-1):0;
+          for(int i=0;i<n;i++) mkB(b.x,b.y, base+st*i, bs(150),1,b.hue);
+          b.spinAng += Math.toRadians(5)*(b.s1==0?1:-1);
+          if(Math.abs(b.spinAng)>Math.toRadians(55)) b.s1^=1;
+        }
+        break;
+      /* ---- 第2層 ブルーム：全方位リング ---- */
+      case RING1:
+        if(t%ivl(1.5)==0) ring(b, dcnt(24), 140, t*0.06, 0, 0);
+        break;
+      case SPIRALFLOWER:
+        if(t%ivl(0.30)==0){ int n=dcnt(20); ring(b,n,150,b.spinAng,1,0); b.spinAng+=Math.PI*2/n/2; }
+        break;
+      case DRING:
+        if(t%ivl(1.6)==0){ int n=dcnt(18); ring(b,n,130,0,0,0); ring(b,n,162,Math.PI/n,2,30); }
+        break;
+      case CONTRACT:
+        if(t%ivl(1.0)==0){ int n=dcnt(28); double cx=W/2,cy=H*0.40,R=470;
+          for(int i=0;i<n;i++){ double a=i*Math.PI*2/n + t*0.05; double bx=cx+Math.cos(a)*R, by=cy+Math.sin(a)*R;
+            mkB(bx,by, Math.atan2(cy-by,cx-bx), bs(130),0,b.hue); } }
+        break;
+      /* ---- 第3層 ヴォルテクス：螺旋 ---- */
+      case VORTEX:
+        if(t%ivl(0.08)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,160,0,0); b.spinAng+=Math.toRadians(13); }
+        break;
+      case TWIN:
+        if(t%ivl(0.07)==0){ arm(b,b.spinAng,170,0,0); arm(b,b.spinAng+Math.PI,170,0,0);
+          arm(b,-b.spinAng,170,2,30); arm(b,-b.spinAng+Math.PI,170,2,30); b.spinAng+=Math.toRadians(11); }
+        break;
+      case REVORTEX:
+        if(t%ivl(0.08)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,165,1,0); b.spinAng += Math.toRadians(13)*(b.s1==0?1:-1); }
+        if(t>0 && t % Math.max(40,(int)Math.round(2.0*60*diff().fireMul))==0) b.s1^=1;
+        break;
+      case ACCELV:
+        if(t%ivl(0.07)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++){ Bullet bb=mkB(b.x,b.y,b.spinAng+k*Math.PI*2/arms,bs(120),0,b.hue); bb.accel=pf(40); } b.spinAng+=Math.toRadians(12); }
+        break;
+      case DENSEV:
+        if(t%ivl(0.06)==0){ int arms=(new int[]{2,3,4,6})[diffIdx]; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,160,1,0); b.spinAng+=Math.toRadians(10); }
+        break;
+      case TURB:
+        if(t%ivl(0.06)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,175,0,0); b.spinAng += Math.toRadians(8 + 11*Math.sin(t*0.06)); }
+        break;
+      /* ---- 第4層 グリッド：レーザー・壁 ---- */
+      case LZ_ALT:
+        if(t%ivl(0.9)==0){ boolean left=(b.s1++%2==0); double y0=140+Math.random()*(H*0.55); laser(left?0:W, y0, left?0:Math.PI, teleFrames(), 26, 13, b.hue); }
+        break;
+      case MWALL: emitWall(b,18,(new double[]{4.5,3.5,2.8,2.2})[diffIdx],145); break;
+      case LZ_CROSS:
+        if(t%ivl(1.0)==0){ int te=teleFrames(); double yy=130+Math.random()*(H*0.55), xx=90+Math.random()*(W-180);
+          laser(0,yy,0,te,26,11,b.hue); laser(xx,0,Math.PI/2,te,26,11,b.hue+30); }
+        break;
+      case PINCER:
+        if(t%ivl(2.2)==0){ int n=16, gap=3+(int)(Math.random()*(n-8));
+          for(int i=0;i<n;i++){ if(i>=gap&&i<gap+4) continue; double bx=W*0.05+(W*0.9)*i/(n-1);
+            mkB(bx,-10,Math.PI/2,bs(110),0,b.hue); mkB(bx,H+10,-Math.PI/2,bs(110),0,b.hue); } }
+        if(t%ivl(2.2)==ivl(1.1)){ int te=teleFrames(); laser(0,H*0.5,0,te,30,12,b.hue+20); laser(W,H*0.5,Math.PI,te,30,12,b.hue+20); }
+        break;
+      case LZ_SCAN:
+        if(t%ivl(1.0)==0){ boolean l=(b.s1++%2==0); Laser L=laser(l?40:W-40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=(l?bs(180):-bs(180)); }
+        break;
+      case MAZE: emitMaze(b,20,(new int[]{6,5,4,4})[diffIdx],120); break;
+      case LZ_BLINK:
+        if(t%ivl(0.9)==0){ int g=4+diffIdx; for(int i=0;i<g;i++){ double xx=W*(i+0.5)/g; if(((i+b.s1)%2)==0) laser(xx,0,Math.PI/2,teleFrames(),22,16,b.hue); } b.s1++; }
+        break;
+      case ROTLZ:
+        if(t==1){ b.s2=2+diffIdx; for(int k=0;k<b.s2;k++){ Laser L=laser(b.x,b.y,k*Math.PI*2/b.s2,24,1000000,12,b.hue); L.anchor=true; L.spin=Math.toRadians((new double[]{35,55,75,100})[diffIdx])/60.0; } }
+        break;
+      /* ---- 第5層 エコー：時間差・誘導 ---- */
+      case DELAYB:
+        if(t%ivl(2.0)==0){ int n=dcnt(24); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; double bx=b.x+Math.cos(a)*60,by=b.y+Math.sin(a)*44;
+          Bullet bb=mkB(bx,by,a,0,0,b.hue); bb.mode=1; bb.delay=(int)Math.round((new double[]{0.7,0.5,0.4,0.3})[diffIdx]*60); bb.dsp=bs(165); } }
+        break;
+      case HOMING:
+        if(t%ivl(1.4)==0) ring(b,dcnt(24),150,t*0.05,0,0);
+        if(t%ivl(0.7)==0){ int h=2+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.3+diffIdx*0.5); bb.homTime=130; } }
+        break;
+      case SPLITB:
+        if(t%ivl(1.3)==0){ int n=dcnt(12); double aim=aimAt(b.x,b.y); for(int i=0;i<n;i++){ Bullet bb=mkB(b.x,b.y,aim+(i-n/2.0)*0.12,bs(150),0,b.hue); bb.splitT=(int)Math.round(0.6*60); bb.splitN=4+diffIdx*2; bb.splitSpd=bs(150); bb.splitKind=1; } }
+        break;
+      case CHAIN:{
+        int waves=3+diffIdx, wivl=ivl(0.5);
+        if(t%wivl==0){ int w=t/wivl; if(w<waves){ int n=dcnt(12)+w*2; for(int i=0;i<n;i++){ double a=i*Math.PI*2/n+w*0.2; Bullet bb=mkB(b.x,b.y,a,0,0,b.hue+w*12); bb.mode=1; bb.delay=(int)Math.round(0.5*60)+(waves-w)*8; bb.dsp=bs(160); } } }
+        break; }
+      case WAVE:
+        if(t%ivl(0.7)==0){ int n=dcnt(10); double aim=aimAt(b.x,b.y), amp=(new double[]{18,28,40,52})[diffIdx];
+          for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.18; Bullet bb=mkB(b.x,b.y,a,bs(165),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=amp; bb.sineFreq=0.13; } }
+        break;
+      case SPLITHOM:
+        if(t%ivl(1.6)==0){ int h=2+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.4,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.1+diffIdx*0.5); bb.homTime=80; bb.splitT=(int)Math.round(1.0*60); bb.splitN=2+diffIdx; bb.splitSpd=bs(150); bb.splitKind=0; } }
+        break;
+      case CHASE:
+        if(t%ivl(0.9)==0){ int n=2+diffIdx*2; double aim=aimAt(b.x,b.y); for(int k=0;k<n;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-n/2.0)*0.5,bs(110),2,b.hue+30); bb.mode=2; bb.homTurn=Math.toRadians(0.8); bb.homTime=320; } }
+        break;
+      case GRAVITY:
+        if(t%ivl(1.2)==0){ int n=dcnt(16); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=4; bb.grav=Math.toRadians(0.5+diffIdx*0.35); } }
+        break;
+      case STAGGER:{
+        int per=Math.max(1,(int)Math.round(0.07*60*diff().fireMul));
+        if(t%per==0){ int n=dcnt(16); int pos=(t/per)%(n+8); if(pos<n){ double bx=W*0.08+(W*0.84)*pos/(double)(n-1); mkB(bx,40,Math.PI/2,bs(165),0,b.hue); } }
+        break; }
+      case ECHOV:
+        if(t%ivl(0.8)==0){ int n=dcnt(8); double aim=aimAt(b.x,b.y); for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.2; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=30; bb.sineFreq=0.13; } }
+        if(t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.4,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=120; } }
+        { int per=Math.max(1,(int)Math.round(0.08*60*diff().fireMul)); if(t%per==0){ int n=dcnt(14); int pos=(t/per)%(n+8); if(pos<n){ double bx=W*0.1+(W*0.8)*pos/(double)(n-1); mkB(bx,40,Math.PI/2,bs(160),2,b.hue+20); } } }
+        break;
+      /* ---- 第6層 ルクス：複合 ---- */
+      case C_RINGAIM:
+        if(t%ivl(1.0)==0){ ring(b,dcnt(18),140,t*0.05,0,0); nway(b,3,150,30,1,40); } break;
+      case C_CONCERTO:
+        if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); arm(b,b.spinAng+Math.PI,150,0,0); b.spinAng+=Math.toRadians(12); }
+        if(t%ivl(1.2)==0) ring(b,dcnt(16),150,0,2,30);
+        if(t%ivl(0.6)==0) nway(b,3,150,24,1,60); break;
+      case C_SPIHOM:
+        if(t%ivl(0.10)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,150,0,0); b.spinAng+=Math.toRadians(12); }
+        if(t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=120; } } break;
+      case C_PHANTOM:
+        emitMaze(b,18,(new int[]{6,5,4,4})[diffIdx],120);
+        if(t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=130; } }
+        if(t%ivl(1.4)==0) ring(b,dcnt(16),140,t*0.04,0,20); break;
+      case C_RINGLZ:
+        if(t%ivl(1.2)==0) ring(b,dcnt(18),150,t*0.05,0,0);
+        if(t%ivl(1.3)==0){ boolean left=(b.s1++%2==0); double y0=160+Math.random()*(H*0.5); laser(left?0:W,y0,left?0:Math.PI,teleFrames(),24,12,b.hue+20); } break;
+      case C_REVEL:
+        if(t%ivl(0.08)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++){ Bullet bb=mkB(b.x,b.y,b.spinAng+k*Math.PI*2/arms,bs(120),0,b.hue); bb.accel=pf(40); } b.spinAng+=Math.toRadians(12); }
+        if(t%ivl(1.2)==0){ int n=dcnt(20); double cx=W/2,cy=H*0.4,R=470; for(int i=0;i<n;i++){ double a=i*Math.PI*2/n+t*0.05; double bx=cx+Math.cos(a)*R,by=cy+Math.sin(a)*R; mkB(bx,by,Math.atan2(cy-by,cx-bx),bs(130),2,b.hue+30); } } break;
+      case C_SPIDELAY:
+        if(t%ivl(0.10)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,150,0,0); b.spinAng+=Math.toRadians(12); }
+        if(t%ivl(2.0)==0){ int n=dcnt(18); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; double bx=b.x+Math.cos(a)*60,by=b.y+Math.sin(a)*44; Bullet bb=mkB(bx,by,a,0,2,b.hue+30); bb.mode=1; bb.delay=(int)Math.round(0.5*60); bb.dsp=bs(160); } } break;
+      case C_ZENITH:
+        if(t%ivl(1.0)==0) ring(b,dcnt(22),150,t*0.05,0,0);
+        if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,1,20); b.spinAng+=Math.toRadians(13); }
+        if(t%ivl(1.2)==0){ Laser L=laser(b.x<W/2?40:W-40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=(b.x<W/2?bs(180):-bs(180)); } break;
+      case C_DRINGROT:
+        if(t%ivl(1.4)==0){ int n=dcnt(16); ring(b,n,130,0,0,0); ring(b,n,160,Math.PI/n,2,30); }
+        if(t==1){ b.s2=2+diffIdx; for(int k=0;k<b.s2;k++){ Laser L=laser(b.x,b.y,k*Math.PI*2/b.s2,24,1000000,11,b.hue+20); L.anchor=true; L.spin=Math.toRadians((new double[]{35,55,75,100})[diffIdx])/60.0; } } break;
+      case C_FINSEQ:{
+        int sw=Math.max(40,(int)Math.round((new double[]{1.4,1.0,0.8,0.6})[diffIdx]*60));
+        int phase=(t/sw)%4;
+        if(phase==0){ if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); b.spinAng+=Math.toRadians(13);} }
+        else if(phase==1){ if(t%ivl(1.2)==0) ring(b,dcnt(18),150,0,2,30); }
+        else if(phase==2){ if(t%ivl(0.7)==0) nway(b,3,150,24,1,60); }
+        else { if(t%ivl(1.0)==0){ int n=dcnt(16); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=4; bb.grav=Math.toRadians(0.5);} } }
+        break; }
+      case C_TOTAL:
+        if(t%ivl(1.1)==0){ ring(b,dcnt(14),140,t*0.04,0,0); nway(b,3,150,24,1,40); }
+        if(t%ivl(0.12)==0){ arm(b,b.spinAng,150,0,20); b.spinAng+=Math.toRadians(13);} break;
+      case C_LANTERN:{
+        int layer=Math.min(5, 1 + t/300);   // 段階的に積む
+        if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); b.spinAng+=Math.toRadians(13); }
+        if(layer>=2 && t%ivl(1.2)==0) ring(b,dcnt(16),150,0,2,30);
+        if(layer>=3 && t%ivl(0.7)==0) nway(b,3,150,24,1,60);
+        if(layer>=4 && t%ivl(1.4)==0){ boolean left=(b.s1++%2==0); double y0=160+Math.random()*(H*0.5); laser(left?0:W,y0,left?0:Math.PI,teleFrames(),24,12,b.hue+10); }
+        if(layer>=5 && t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=130; } }
+        break; }
     }
   }
+  // 落下する弾壁（隙間が左右に動く）
+  void emitWall(Boss b,int n,double gapCells,int spd){
+    if(b.atkT%ivl(1.1)!=0) return;
+    int gapW=Math.max(2,(int)Math.round(gapCells));
+    int gap=(int)((Math.sin(b.s1*0.7)*0.5+0.5)*(n-gapW)); b.s1++;
+    for(int i=0;i<n;i++){ if(i>=gap&&i<gap+gapW) continue; double bx=W*0.04+(W*0.92)*i/(n-1); mkB(bx,-10,Math.PI/2,bs(spd),0,b.hue); }
+  }
+  // 迷宮路：窓のある壁を時間差で（窓位置がずれる）
+  void emitMaze(Boss b,int n,int win,int spd){
+    if(b.atkT%ivl(1.2)!=0) return;
+    int pos=(b.s1*5)%Math.max(1,(n-win)); b.s1++;
+    for(int i=0;i<n;i++){ if(i>=pos&&i<pos+win) continue; double bx=W*0.03+(W*0.94)*i/(n-1); mkB(bx,-10,Math.PI/2,bs(spd),0,b.hue); }
+  }
+
+  /* ====================================================================
+     ルナティック専用：L1 無敵耐久100秒 → L2 総ざらい
+     ==================================================================== */
+  void luxEnterL1(Boss b){
+    b.luxPhase=1; b.invincible=true; b.luxTimer=100*60; b.spell=true; b.spellName="ルクス「灯火の証明」";
+    b.declTimer=80; b.atkT=0; b.s1=0; bulletCancelToStars(); lasers.clear();
+    startDialogue(LUNA_L1_INTRO, null);   // 会話後にL1継続（dialogueから戻る）
+    sound.spellDeclare();
+  }
+  void luxL1(Boss b){
+    if(b.declTimer>0){ b.declTimer--; return; }
+    b.luxTimer--; b.atkT++;
+    int sec = b.luxTimer/60;
+    int wave = sec>70?1 : sec>30?2 : 3;     // 100→70:第1波 70→30:第2波 30→0:第3波
+    int t=b.atkT;
+    // 外周からの全方位
+    if(t%ivl(0.7)==0){ double ex=Math.random()*W; mkB(ex,-10,Math.PI/2+rr(-0.3,0.3),bs(150),0,b.hue); mkB(ex,H+10,-Math.PI/2+rr(-0.3,0.3),bs(150),0,b.hue); }
+    if(t%ivl(0.7)==0){ double ey=Math.random()*H; mkB(-10,ey,rr(-0.3,0.3),bs(150),0,b.hue); mkB(W+10,ey,Math.PI+rr(-0.3,0.3),bs(150),0,b.hue); }
+    if(wave>=2){
+      if(t%ivl(0.5)==0){ for(double[] c:new double[][]{{0,0},{W,0},{0,H},{W,H}}){ double a=Math.atan2(py-c[1],px-c[0]); mkB(c[0],c[1],a,bs(185),1,b.hue+30); } }
+      if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,20); arm(b,b.spinAng+Math.PI,150,0,20); b.spinAng+=Math.toRadians(11); }
+    }
+    if(wave>=3){
+      if(t%ivl(0.9)==0) ring(b,dcnt(20),150,t*0.05,2,40);
+      if(t%ivl(1.2)==0){ Laser L=laser(40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=bs(180); }
+    }
+    if(b.luxTimer<=0){ // L2 へ
+      b.luxPhase=2; b.invincible=false; b.dead=false;
+      b.atks = buildLuxL2Atks(); b.atkIdx=0; b.totalHp=(int)Math.round(BOSSES[5].hp*1.4); b.segHp=Math.max(1,b.totalHp/b.atks.length);
+      startDialogue(LUNA_L2_INTRO, ()->bossStartAtk(b));
+    }
+  }
+  Atk[] buildLuxL2Atks(){
+    // 全層の通常→スペルを層順でダイジェスト再演（持続短め）
+    List<Atk> a=new ArrayList<>();
+    for(BossInfo bi:BOSSES) for(Atk at:bi.atks) a.add(new Atk(at.spell, at.name, at.script, Math.max(8, at.sec*0.5)));
+    a.add(S("灯火回廊（最終）",C_LANTERN,40));
+    return a.toArray(new Atk[0]);
+  }
+
+  /* ====================================================================
+     会話システム
+     ==================================================================== */
+  void startDialogue(String[] lines, Runnable after){
+    dlg=lines; dlgIdx=0; dlgAfter=after; state="dialogue"; clearJust();
+  }
+  void updateDialogue(){
+    frame++;
+    if(actJust("confirm")||actJust("shot")||actJust("bomb")){
+      sound.menu(); dlgIdx++;
+      if(dlg==null || dlgIdx>=dlg.length){
+        Runnable a=dlgAfter; dlgAfter=null; dlg=null; state="play";
+        if(a!=null) a.run();
+      }
+    }
+    clearJust();
+  }
+  void drawDialogue(Graphics2D g2){
+    drawBackground(g2,stageIndex);
+    Shape oc=g2.getClip(); g2.setClip(0,0,W,H); drawWorld(g2); g2.setClip(oc);
+    drawPlayfieldFrame(g2); drawSidebar(g2);
+    String line = (dlg!=null && dlgIdx<dlg.length)? dlg[dlgIdx] : "";
+    String sp="", tx=line; int bar=line.indexOf('|'); if(bar>=0){ sp=line.substring(0,bar); tx=line.substring(bar+1); }
+    int bx=20, by=H-210, bw=W-40, bh=160;
+    g2.setColor(new Color(6,10,26,228)); g2.fillRoundRect(bx,by,bw,bh,18,18);
+    g2.setColor(new Color(120,160,220,210)); g2.setStroke(new BasicStroke(2f)); g2.drawRoundRect(bx,by,bw,bh,18,18);
+    g2.setColor(new Color(255,222,150)); g2.setFont(new Font("SansSerif",Font.BOLD,22)); g2.drawString(sp, bx+26, by+40);
+    g2.setColor(new Color(120,150,200)); g2.fillRect(bx+24, by+52, bw-48, 1);
+    g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.PLAIN,18));
+    drawWrapped(g2, tx, bx+26, by+84, bw-52, 30);
+    g2.setColor(new Color(150,180,220)); g2.setFont(new Font("SansSerif",Font.PLAIN,13));
+    g2.drawString("Z / Enter  ▶", bx+bw-110, by+bh-16);
+  }
+
   void bulletCancelToStars(){
     // 星パーティクルは数を抑えて生成（大量弾消し時の処理落ち防止）。得点は全弾分。
     int budget = Math.max(0, 240 - particles.size());
@@ -576,20 +918,32 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   /* ====================================================================
      ステージ進行
      ==================================================================== */
-  StageRunner buildStageTimeline(int idx){
+  StageRunner buildStageTimeline(final int idx){
     StageRunner sr=new StageRunner(); sr.events=new ArrayList<>();
-    int t=80; int waveCount=11+idx*3;
-    for(int w=0;w<waveCount;w++){
-      final String kind = pick(new String[]{"line","vee","stream","tank","swarm","sides"});
-      final double baseHue = STAGE_INFO[idx].bg + ir(-40,40);
-      sr.events.add(new Ev(t, ()->spawnWave(kind,idx,baseHue)));
-      t += Math.max(70, ir(95,160) - idx*3);
-    }
-    int bossAt = t + 140;
-    sr.events.add(new Ev(bossAt-90, ()->{ bossWarn=90; sound.bossDown(); }));
-    sr.events.add(new Ev(bossAt, ()->{ boss = makeBoss(idx); }));
+    int t=90; final double bh=STAGE_INFO[idx].bg;
+    // 前半ウェーブ
+    int w1=3+idx;
+    for(int w=0;w<w1;w++){ final String k=pick(new String[]{"line","vee","stream","swarm","sides"});
+      final double h=bh+ir(-30,30); sr.events.add(new Ev(t,()->spawnWave(k,idx,h))); t+=ir(95,150); }
+    // 中ボス
+    sr.events.add(new Ev(t, ()->spawnMidboss(idx))); t+=560;
+    // 後半ウェーブ
+    int w2=2+idx;
+    for(int w=0;w<w2;w++){ final String k=pick(new String[]{"line","vee","stream","swarm","sides"});
+      final double h=bh+ir(-30,30); sr.events.add(new Ev(t,()->spawnWave(k,idx,h))); t+=ir(95,150); }
+    // ボス：WARNING → 会話 → 出現
+    final int bossAt = t + 150;
+    sr.events.add(new Ev(bossAt-110, ()->{ bossWarn=110; sound.bossDown(); }));
+    sr.events.add(new Ev(bossAt, ()-> startDialogue(INTRO[idx], ()->{ boss=makeBoss(idx); bossWarn=0; }) ));
     sr.finalTime = bossAt;
     return sr;
+  }
+  // 中ボス：層テーマに沿った簡単な攻撃をする大型機（HPバーつき・倒すと先へ）
+  void spawnMidboss(int idx){
+    EnemyType g=makeUniqueEnemyType(STAGE_INFO[idx].bg,3,"hover",pick(ENEMY_SHAPES));
+    g.hp = (int)Math.round(g.hp * (0.8+0.25*diffIdx));
+    spawnEnemy(g, W/2, -60, 110, 0);
+    floatText(W/2, 150, "― 中ボス ―", STAGE_INFO[idx].bg);
   }
   void setDelayed(int delay, Runnable fn){ delayed.add(new Ev(stageTimer+delay, fn)); }
 
@@ -670,7 +1024,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     bombs--; pBombTimer=80; pInvuln=Math.max(pInvuln,90); sound.bomb();
     flash=0.8; shake=14; bulletCancelToStars();
     for(Enemy e:enemies){ e.hp-=60; e.hitFlash=3; }
-    if(boss!=null){ boss.captured=false; bossTakeDamage(boss, Math.max(1500, boss.phaseHpMax/12)); }
+    if(boss!=null){ boss.captured=false; bossTakeDamage(boss, Math.max(800, boss.segHp/10)); }
   }
   void clearEnemyBullets(boolean toScore){
     if(toScore) for(Bullet b:enemyBullets){
@@ -707,7 +1061,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(pInvuln<=0){
       for(Enemy e:enemies){ double rr=e.g.size*0.55+pr;
         if((e.x-px)*(e.x-px)+(e.y-py)*(e.y-py)<rr*rr){ playerDie(); break; } }
-      if(boss!=null && !boss.entering){ double rr=boss.r*0.5+pr;
+      if(boss!=null && !boss.entering){ double rr=boss.size*0.5+pr;
         if((boss.x-px)*(boss.x-px)+(boss.y-py)*(boss.y-py)<rr*rr) playerDie(); }
     }
     for(Item it:items){ double rr=pr+it.r+8;
@@ -772,7 +1126,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       for(Enemy e:enemies){ double rr=e.g.size*0.7+b.r;
         if((e.x-b.x)*(e.x-b.x)+(e.y-b.y)*(e.y-b.y)<rr*rr){ e.hp-=b.dmg; e.hitFlash=2; hit=true; sound.enemyHit();
           Particle p=new Particle(); p.x=b.x;p.y=b.y;p.life=1;p.decay=0.1;p.hue=e.g.hue;p.r=3; particles.add(p); break; } }
-      if(!hit && boss!=null && !boss.entering && !boss.dead){ double rr=boss.r*0.85+b.r;
+      if(!hit && boss!=null && !boss.entering && !boss.dead){ double rr=boss.size*0.85+b.r;
         if((boss.x-b.x)*(boss.x-b.x)+(boss.y-b.y)*(boss.y-b.y)<rr*rr){ bossTakeDamage(boss,b.dmg); hit=true; sound.bossHit();
           Particle p=new Particle(); p.x=b.x;p.y=b.y;p.life=0.6;p.decay=0.12;p.hue=boss.hue;p.r=3; particles.add(p); } }
       if(hit) playerBullets.remove(i);
@@ -809,18 +1163,16 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       updateBoss(boss);
       if(boss.dead){
         if(boss.deathTimer%6==0) explosion(boss.x+rr(-40,40), boss.y+rr(-40,40), boss.hue, true);
-        if(boss.deathTimer>120){ boss=null; state="stageclear"; transTimer=200; sound.stopBGM(); }
+        if(boss.deathTimer>120){
+          int bi=boss.idx; boss=null; lasers.clear(); enemyBullets.clear();
+          // 撃破後アウトロ会話 → 次の層へ
+          String[] out = (bi==5 && isLunatic())? LUNA_OUTRO : OUTRO[bi];
+          startDialogue(out, ()->{ state="stageclear"; transTimer=200; sound.stopBGM(); });
+        }
       }
     }
-    for(int i=enemyBullets.size()-1;i>=0;i--){
-      Bullet b=enemyBullets.get(i);
-      b.speed+=b.accel; if(b.speed<1.0)b.speed=1.0; if(b.speed>12)b.speed=12;
-      // 旋回しすぎる弾は直進化（画面内を回り続けて消えないのを防ぐ）
-      if(b.curve!=0){ b.turned += Math.abs(b.curve); if(b.turned>2.2) b.curve=0; }
-      b.angle+=b.curve;
-      b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; b.life++;
-      if(b.x<-30||b.x>W+30||b.y<-30||b.y>H+30 || b.life>1200) enemyBullets.remove(i);
-    }
+    updateLasers();
+    updateEnemyBullets();
     for(int i=items.size()-1;i>=0;i--){ Item it=items.get(i); updateItem(it); if(it.dead||it.y>H+30) items.remove(i); }
     for(int i=particles.size()-1;i>=0;i--){ Particle p=particles.get(i); p.x+=p.vx;p.y+=p.vy;p.vy+=0.03;p.life-=p.decay; if(p.life<=0) particles.remove(i); }
     for(int i=floaters.size()-1;i>=0;i--){ Floater f=floaters.get(i); f.y-=0.6; f.life-=0.02; if(f.life<=0) floaters.remove(i); }
@@ -830,6 +1182,78 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     clearJust();
   }
 
+  // 敵弾の更新（通常／停止→再加速／誘導／サイン波／重力／分裂）
+  void updateEnemyBullets(){
+    for(int i=enemyBullets.size()-1;i>=0;i--){
+      Bullet b=enemyBullets.get(i);
+      // 分裂
+      if(b.splitT>0){ b.splitT--; if(b.splitT==0){ for(int k=0;k<b.splitN;k++){ Bullet c=mkB(b.x,b.y,k*Math.PI*2/b.splitN,b.splitSpd,b.splitKind,b.hue); } enemyBullets.remove(i); continue; } }
+      switch(b.mode){
+        case 1: // 停止 → 解除後に自機方向へ
+          if(b.delay>0){ b.delay--; if(b.delay==0){ b.angle=Math.atan2(py-b.y,px-b.x); b.speed=b.dsp; } break; }
+          b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; break;
+        case 2: // 誘導
+          if(b.homTime>0){ b.homTime--; double des=Math.atan2(py-b.y,px-b.x);
+            double d=Math.atan2(Math.sin(des-b.angle),Math.cos(des-b.angle));
+            b.angle += Math.max(-b.homTurn,Math.min(b.homTurn,d)); }
+          b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; break;
+        case 3: // サイン波
+          b.dist += b.speed; double px2=Math.cos(b.baseAngle), py2=Math.sin(b.baseAngle);
+          double off=Math.sin(b.life*b.sineFreq)*b.sineAmp;
+          b.x = b.sx0 + px2*b.dist - py2*off; b.y = b.sy0 + py2*b.dist + px2*off; break;
+        case 4: // 重力（自機へ引き寄せ）
+          { double des=Math.atan2(py-b.y,px-b.x); double d=Math.atan2(Math.sin(des-b.angle),Math.cos(des-b.angle));
+            b.angle += Math.max(-b.grav,Math.min(b.grav,d)); }
+          b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; break;
+        default:
+          b.speed+=b.accel; if(b.speed>14)b.speed=14;
+          if(b.curve!=0){ b.turned+=Math.abs(b.curve); if(b.turned>2.2) b.curve=0; }
+          b.angle+=b.curve;
+          b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed;
+      }
+      b.life++;
+      if(b.x<-40||b.x>W+40||b.y<-40||b.y>H+40 || b.life>1400) enemyBullets.remove(i);
+    }
+  }
+  // レーザーの更新と被弾
+  void updateLasers(){
+    for(int i=lasers.size()-1;i>=0;i--){
+      Laser L=lasers.get(i); L.t++;
+      if(L.anchor && boss!=null){ L.x=boss.x; L.y=boss.y; } else { L.x+=L.vx; L.y+=L.vy; }
+      L.angle += L.spin;
+      boolean active = L.t>=L.tele && L.t<L.tele+L.active;
+      if(active && pInvuln<=0 && !pDead && laserHit(L)) playerDie();
+      if(L.t>=L.tele+L.active) lasers.remove(i);
+    }
+  }
+  boolean laserHit(Laser L){
+    double dx=px-L.x, dy=py-L.y, c=Math.cos(L.angle), s=Math.sin(L.angle);
+    double proj=dx*c+dy*s; if(proj<0||proj>L.len) return false;
+    double perp=Math.abs(-dx*s+dy*c); return perp < L.width/2 + pr;
+  }
+  void drawLasers(Graphics2D g2){
+    for(Laser L:lasers){
+      double c=Math.cos(L.angle), s=Math.sin(L.angle);
+      double x2=L.x+c*L.len, y2=L.y+s*L.len;
+      boolean active = L.t>=L.tele && L.t<L.tele+L.active;
+      if(!active){ // 予告線
+        float a=(float)(0.25+0.35*Math.abs(Math.sin(L.t*0.4)));
+        g2.setColor(hsba(L.hue,0.7,1.0,(int)(a*200))); g2.setStroke(new BasicStroke(2f));
+        g2.draw(new Line2D.Double(L.x,L.y,x2,y2));
+      } else {
+        int phase = L.t-L.tele; double grow = Math.min(1, phase/4.0);
+        double w = L.width*grow;
+        g2.setColor(hsba(L.hue,0.8,0.5,150)); g2.setStroke(new BasicStroke((float)(w*2),BasicStroke.CAP_ROUND,BasicStroke.JOIN_ROUND));
+        g2.draw(new Line2D.Double(L.x,L.y,x2,y2));
+        g2.setColor(hsba(L.hue,0.6,0.9,235)); g2.setStroke(new BasicStroke((float)w,BasicStroke.CAP_ROUND,BasicStroke.JOIN_ROUND));
+        g2.draw(new Line2D.Double(L.x,L.y,x2,y2));
+        g2.setColor(new Color(255,255,255,235)); g2.setStroke(new BasicStroke((float)Math.max(1.5,w*0.4),BasicStroke.CAP_ROUND,BasicStroke.JOIN_ROUND));
+        g2.draw(new Line2D.Double(L.x,L.y,x2,y2));
+      }
+    }
+    g2.setStroke(new BasicStroke(1f));
+  }
+
   /* ====================================================================
      状態ディスパッチ
      ==================================================================== */
@@ -837,6 +1261,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     switch(state){
       case "menu": updateMenu(); break;
       case "charselect": updateCharSelect(); break;
+      case "dialogue": updateDialogue(); break;
       case "help": if(actJust("confirm")||actJust("shot")){ state="menu"; sound.menu(); } clearJust(); break;
       case "briefing": transTimer--; frame++; if(transTimer<=0){ state="play"; } clearJust(); break;
       case "play": updatePlay(); break;
@@ -887,7 +1312,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     clearJust();
   }
   void startNewGame(){
-    usedPatternSigs.clear(); usedEnemySigs.clear(); usedSpellNames.clear(); usedDesign.clear(); enemyDesignRot=0;
+    usedPatternSigs.clear(); usedEnemySigs.clear(); usedDesign.clear(); enemyDesignRot=0;
     rng = new Random();
     score=0; lives=diff().lives; bombs=diff().bombs; power=0; stageIndex=0; grazeCount=0;
     resetPlayer();
@@ -955,6 +1380,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     switch(state){
       case "menu": drawMenu(g2); break;
       case "charselect": drawCharSelect(g2); break;
+      case "dialogue": drawDialogue(g2); break;
       case "help": drawHelp(g2); break;
       case "briefing": drawBackground(g2,stageIndex); drawBriefing(g2); break;
       case "play": case "paused": case "stageclear": case "gameover": {
@@ -1028,15 +1454,19 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     for(Enemy e:enemies) drawEnemy(g2,e);
     if(boss!=null) drawBoss(g2,boss);
     drawItems(g2);
+    drawLasers(g2);
     drawBullets(g2);
     drawParticles(g2);
     drawPlayer(g2);
     drawFloaters(g2);
-    // ボスのフェーズHPバー（プレイフィールド最上部）
+    // ボスのHPバー（プレイフィールド最上部）
     if(boss!=null && !boss.entering){
       g2.setColor(new Color(0,0,0,110)); g2.fill(new Rectangle2D.Double(40,8,W-80,8));
-      g2.setColor(hsb(boss.hue,0.85,0.6)); g2.fill(new Rectangle2D.Double(40,8,(W-80)*((double)boss.hp/boss.phaseHpMax),8));
+      double frac = boss.invincible? 1.0 : (double)boss.hp/Math.max(1,boss.segHp);
+      g2.setColor(boss.invincible? new Color(180,180,200) : hsb(boss.hue,0.85,0.6));
+      g2.fill(new Rectangle2D.Double(40,8,(W-80)*Math.max(0,frac),8));
       g2.setColor(new Color(255,255,255,90)); g2.setStroke(new BasicStroke(1f)); g2.draw(new Rectangle2D.Double(40,8,W-80,8));
+      if(boss.invincible){ g2.setColor(new Color(255,210,120)); g2.setFont(new Font("SansSerif",Font.BOLD,22)); centerStr(g2,"INVINCIBLE  "+(boss.luxTimer/60),W/2,40); }
     }
   }
 
@@ -1108,7 +1538,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   void drawBoss(Graphics2D g2,Boss b){
     AffineTransform t=g2.getTransform();
     g2.translate(b.x,b.y);
-    double s=b.r; double hue=b.hue; boolean lit=b.hitFlash>0;
+    double s=b.size; double hue=b.hue; boolean lit=b.hitFlash>0;
     // 足元の魔法陣
     AffineTransform mcT=g2.getTransform(); g2.rotate(b.t*0.006);
     g2.setStroke(new BasicStroke(2f)); g2.setColor(hsba(hue,0.7,0.6,55));
@@ -1253,8 +1683,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   }
   void drawSidebar(Graphics2D g2){
     int sx=W+24, right=VW-20, sw=right-sx;
-    g2.setFont(F_TITLE); g2.setColor(new Color(150,200,255)); g2.drawString("STELLAR",sx,46);
-    g2.setColor(new Color(190,150,255)); g2.drawString("CASCADE",sx,72);
+    g2.setFont(F_TITLE); g2.setColor(new Color(255,190,110)); g2.drawString("灯火回廊",sx,46);
+    g2.setColor(new Color(150,200,255)); g2.setFont(F_SMALL); g2.drawString("A S C E N T",sx,66);
     g2.setFont(F_LBL); g2.setColor(new Color(150,180,220)); g2.drawString("SCORE",sx,108);
     g2.setFont(F_NUM); g2.setColor(Color.WHITE); g2.drawString(pad(score,8),sx,134);
     g2.setFont(F_SMALL); g2.setColor(new Color(127,168,216)); g2.drawString("HI "+pad(hiscore,8),sx,154);
@@ -1272,13 +1702,14 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(boss!=null && !boss.entering){
       g2.setFont(F_LBL); g2.setColor(new Color(255,120,150)); g2.drawString("◆ BOSS",sx,368);
       g2.setFont(F_SMALL); g2.setColor(new Color(220,230,250)); drawWrapped(g2,boss.name,sx,388,sw,15);
-      int remain=boss.phaseCount-boss.phase;
-      for(int i=0;i<boss.phaseCount;i++){ g2.setColor(i<remain?new Color(255,90,120):new Color(70,70,82));
-        g2.fill(circle(sx+8+i*16,410,5)); }
-      g2.setColor(hsb(boss.hue,0.5,1.0)); g2.setFont(F_LBL); drawWrapped(g2,boss.spellName,sx,442,sw,20);
-      int secs=(int)Math.ceil(boss.spellTimer/60.0);
+      int total=boss.atks.length, remain=total-boss.atkIdx;
+      for(int i=0;i<total;i++){ g2.setColor(i<remain?(boss.cur().spell?new Color(255,90,120):new Color(120,170,255)):new Color(70,70,82));
+        g2.fill(circle(sx+8+i*12,410,4)); }
+      if(boss.spell){ g2.setColor(hsb(boss.hue,0.5,1.0)); g2.setFont(F_LBL); drawWrapped(g2,boss.cur().name,sx,442,sw,20); }
+      else { g2.setColor(new Color(150,170,200)); g2.setFont(F_SMALL); g2.drawString("― 通常弾幕 ―",sx,442); }
+      int secs=Math.max(0,(boss.timeLimit-boss.atkT)/60);
       g2.setColor(secs<=5?new Color(255,90,90):Color.WHITE); g2.setFont(F_TIMER);
-      g2.drawString("TIME  "+secs,sx,498);
+      g2.drawString("TIME  "+secs,sx,494);
     }
     g2.setFont(F_SMALL); g2.setColor(new Color(143,184,232)); g2.drawString(STAGE_INFO[stageIndex].name,sx,H-92);
     g2.setColor(new Color(120,160,210)); g2.drawString(STAGE_INFO[stageIndex].sub,sx,H-72);
@@ -1320,15 +1751,15 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       g2.setColor(new Color(159,200,255,(int)(120+Math.sin((frame+st.x)*0.05)*90)));
       g2.fill(new Rectangle2D.Double(st.x,st.y,st.s,st.s)); }
     // タイトル
-    AffineTransform t=g2.getTransform(); g2.translate(CX,250);
-    g2.setFont(new Font("SansSerif",Font.BOLD,64));
-    g2.setColor(new Color(92,225,255)); centerStr(g2,"STELLAR",2,2);
-    g2.setColor(Color.WHITE); centerStr(g2,"STELLAR",0,0);
-    g2.setColor(new Color(176,123,255)); centerStr(g2,"CASCADE",2,66);
-    g2.setColor(Color.WHITE); centerStr(g2,"CASCADE",0,64);
+    AffineTransform t=g2.getTransform(); g2.translate(CX,236);
+    g2.setFont(new Font("SansSerif",Font.BOLD,68));
+    g2.setColor(new Color(255,180,90)); centerStr(g2,"灯火回廊",3,3);
+    g2.setColor(Color.WHITE); centerStr(g2,"灯火回廊",0,0);
+    g2.setFont(new Font("SansSerif",Font.BOLD,40));
+    g2.setColor(new Color(120,200,255)); centerStr(g2,"― ASCENT ―",0,58);
     g2.setTransform(t);
-    g2.setColor(new Color(127,168,216)); g2.setFont(new Font("SansSerif",Font.BOLD,18));
-    centerStr(g2,"— 六面制 弾幕シューティング —",CX,350);
+    g2.setColor(new Color(180,190,210)); g2.setFont(new Font("SansSerif",Font.BOLD,16));
+    centerStr(g2,"放棄ステーション「回廊」を、下層から最上層へ",CX,330);
 
     String[] labels={"ゲームスタート","難易度:  "+diff().name,"遊び方","ハイスコア消去"};
     for(int i=0;i<labels.length;i++){
@@ -1343,7 +1774,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     centerStr(g2,"低速(当たり判定表示): Shift    ポーズ: P    ミュート: M",CX,H-88);
     g2.setColor(new Color(58,86,127)); g2.setFont(new Font("SansSerif",Font.PLAIN,12));
     centerStr(g2,"HI-SCORE  "+pad(hiscore,8),CX,H-52);
-    centerStr(g2,"敵も弾幕も自動生成 — 1プレイ中は同じものが出ません",CX,H-30);
+    centerStr(g2,"全6層・各層に中ボスとボス／通常↔スペル交互の手作り弾幕",CX,H-30);
   }
   void drawHelp(Graphics2D g2){
     g2.setColor(new Color(6,9,22)); g2.fillRect(0,0,VW,H);
@@ -1374,7 +1805,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     for(Star st:tstars){ st.y+=st.z; if(st.y>H)st.y=0;
       g2.setColor(new Color(159,200,255,80)); g2.fill(new Rectangle2D.Double(st.x,st.y,st.s,st.s)); }
     g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.BOLD,30));
-    centerStr(g2,"機体・装備 選択",CX,90);
+    centerStr(g2,"ランタン号 ― 装備選択",CX,90);
     PChar c=CHARS[charSel];
     drawSelRow(g2,"機体",c.name,c.desc,210,selRow==0);
     drawSelRow(g2,"ショット",SHOT_NAMES[shotSel].trim(),SHOT_DESC[shotSel],330,selRow==1);
@@ -1432,17 +1863,15 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     centerStr(g2,"Z / Enter でタイトルへ",CX,H/2+70);
   }
   void drawVictory(Graphics2D g2){
-    g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.BOLD,50)); centerStr(g2,"ALL CLEAR!",CX,220);
-    g2.setColor(new Color(255,210,127)); g2.setFont(new Font("SansSerif",Font.BOLD,22)); centerStr(g2,"全6面 制覇 — おめでとう！",CX,280);
+    g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.BOLD,50)); centerStr(g2,"ALL CLEAR",CX,220);
+    g2.setColor(new Color(255,210,127)); g2.setFont(new Font("SansSerif",Font.BOLD,22)); centerStr(g2,"全6層を突破 — 灯を継ぐ者よ",CX,280);
     g2.setColor(new Color(207,227,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,18)); centerStr(g2,"最終スコア",CX,360);
     g2.setColor(Color.WHITE); g2.setFont(new Font("Monospaced",Font.BOLD,36)); centerStr(g2,pad(score,8),CX,410);
     g2.setColor(new Color(255,180,210)); g2.setFont(new Font("SansSerif",Font.BOLD,17));
     centerStr(g2,"GRAZE  "+grazeCount,CX,458);
     g2.setColor(new Color(127,208,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,15));
-    centerStr(g2,"出現した固有の敵タイプ: "+usedEnemySigs.size()+" 種",CX,492);
-    centerStr(g2,"出現した固有の弾幕: "+usedPatternSigs.size()+" 種",CX,518);
-    centerStr(g2,"出現したスペルカード: "+usedSpellNames.size()+" 種",CX,544);
-    centerStr(g2,"（この1プレイ中はすべて異なるパターンでした）",CX,570);
+    centerStr(g2,"全6層を突破 — 回廊を越えた者",CX,500);
+    centerStr(g2,"DIFFICULTY  "+diff().name,CX,528);
     g2.setColor(new Color(159,200,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,16)); centerStr(g2,"Z / Enter でタイトルへ",CX,624);
   }
 
@@ -1570,9 +1999,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
      ==================================================================== */
   public static void main(String[] args){
     if(args.length>0 && args[0].equals("selftest")){ runSelfTest(); return; }
-    try{ System.setProperty("apple.awt.application.name","Stellar Cascade"); }catch(Exception e){}
+    try{ System.setProperty("apple.awt.application.name","灯火回廊 ASCENT"); }catch(Exception e){}
     SwingUtilities.invokeLater(()->{
-      JFrame f=new JFrame("STELLAR CASCADE");
+      JFrame f=new JFrame("灯火回廊 ― ASCENT");
       StellarCascade panel=new StellarCascade();
       f.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
       f.setContentPane(panel);
@@ -1597,14 +2026,26 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       for(int f=0;f<400;f++){ g.down[KeyEvent.VK_Z]=true; g.update(); g.renderGame(g2); }
       if(g.stageRunner!=null) g.stageTimer = g.stageRunner.finalTime+5;
       for(int f=0;f<500;f++){ g.update(); g.renderGame(g2); }
-      if(g.boss!=null){ for(int i=0;i<30;i++){ g.bossTakeDamage(g.boss,150); g.update(); g.renderGame(g2); } }
-      // ボス戦の代表フレームをPNG保存（レイアウト目視確認用）
-      try{ javax.imageio.ImageIO.write(img,"png",new File("/tmp/sc_frame.png")); }catch(Exception ex){}
-      // 全ボス + 全弾幕タイプ + 全難易度
-      for(int d=0;d<DIFFS.length;d++){ g.diffIdx=d;
-        for(int bi=0;bi<6;bi++){ Boss b=g.makeBoss(bi); b.entering=false; for(int k=0;k<40;k++){ g.updateBoss(b); g.bossTakeDamage(b,1000);} } }
-      String[] types={"ring","spiral","fan","spray","wall","flower","aimedBurst","cross","arc","rain"};
-      for(String t:types){ Pattern p=g.makeUniquePattern(t,200,1.0,0.5); g.firePattern(360,200,p); }
+      // 各層ボスを実際に稼働（全攻撃スクリプト・レーザー・弾挙動・撃破→会話まで）
+      for(int d=0; d<DIFFS.length; d++){
+        for(int bi=0; bi<6; bi++){
+          g.diffIdx=d; g.startNewGame(); g.stageIndex=bi; g.state="play"; g.stageRunner=null; g.enemies.clear(); g.boss=null; g.lasers.clear(); g.enemyBullets.clear();
+          g.boss=g.makeBoss(bi); g.boss.entering=false; g.bossStartAtk(g.boss);
+          for(int f=0; f<760; f++){ g.down[KeyEvent.VK_Z]=true; g.px=200+Math.sin(f*0.05)*120; g.py=H-160; g.update();
+            if(d==1 && bi==3 && f==360){ try{ javax.imageio.ImageIO.write(img,"png",new File("/tmp/sc_frame.png")); }catch(Exception ex){} }
+            if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); }
+            g.renderGame(g2);
+          }
+        }
+      }
+      // ルナ最終ボスの L1(無敵耐久)→L2(総ざらい) 経路
+      g.diffIdx=3; g.startNewGame(); g.stageIndex=5; g.state="play"; g.stageRunner=null;
+      g.boss=g.makeBoss(5); g.boss.entering=false; g.bossStartAtk(g.boss);
+      g.boss.atkIdx=g.boss.atks.length-1; g.boss.invuln=0; g.boss.declTimer=0; g.bossTakeDamage(g.boss,9999999);  // 最終→撃破→L1突入
+      if(g.state.equals("dialogue")){ for(int q=0;q<8 && g.state.equals("dialogue"); q++){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }
+      int luxp = g.boss!=null? g.boss.luxPhase : -1;
+      for(int f=0; f<400; f++){ g.update(); if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }  // L1稼働
+      System.out.println("LUNA path: luxPhase(after L1 entry)="+luxp);
       // 全機体 × 全ショット（誘導弾含む）を発射 → 命中処理まで
       g.power=99;
       for(int cs=0; cs<CHARS.length; cs++){ for(int ss=0; ss<SHOT_NAMES.length; ss++){
