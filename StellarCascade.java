@@ -1,7 +1,7 @@
 /* =======================================================================
    STELLAR CASCADE  —  6面制 弾幕シューティング（Java / Swing + Java2D）
    - メニュー → 6ステージ → 各ボス → エンディング
-   - 敵・弾幕はプロシージャル生成 + シグネチャ照合で「二度と同じものが出ない」
+   - 敵・弾幕はプロシージャル生成 + シグネチャ照合で「1プレイ中は同じものが出ない」（登録は startNewGame でリセット）
    - 難易度 EASY / NORMAL / HARD
    コンパイル: javac StellarCascade.java
    実行:       java StellarCascade
@@ -56,6 +56,93 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   <T> T pick(T[] arr){ return arr[rng.nextInt(arr.length)]; }
 
   static final String[] PATTERN_TYPES = {"ring","spiral","fan","spray","wall","flower","aimedBurst","cross","arc","rain"};
+
+  /* ---- 手で作り込んだ弾幕テンプレート（ランダムではなく設計済み） ----
+     count=弾数(リング/扇等) arms=本数(螺旋/十字) spd=基準弾速 spin=毎回の回転
+     spreadDeg=扇の角度 aim=自機狙い kind=弾種(0玉1米2大玉) interval=連射間隔 hueOff=色相オフセット */
+  static class Tmpl {
+    String type; int count,arms; double spd,spin,spreadDeg; boolean aim; int kind,interval,hueOff;
+    Tmpl(String t,int c,int a,double s,double sp,double spr,boolean ai,int k,int iv,int ho){
+      type=t;count=c;arms=a;spd=s;spin=sp;spreadDeg=spr;aim=ai;kind=k;interval=iv;hueOff=ho;
+    }
+  }
+  // ボス級：綺麗な対称性・一定の回転・読める隙間を持つ設計弾幕
+  static final Tmpl[] DESIGNS = {
+    new Tmpl("ring",   20,1, 2.6, 0.12,  0, false, 0, 11,  0),  // 回転リング
+    new Tmpl("ring",   24,1, 2.3,-0.09,  0, false, 0, 13, 30),  // 逆回転リング
+    new Tmpl("ring",   12,1, 3.1, 0.17,  0, false, 2, 12,  0),  // 粗い高速回転（大玉）
+    new Tmpl("spiral",  0,3, 3.0, 0.050, 0, false, 0,  4,  0),  // 3本螺旋
+    new Tmpl("spiral",  0,4, 2.7,-0.045, 0, false, 0,  4, 20),  // 4本逆螺旋
+    new Tmpl("spiral",  0,5, 2.9, 0.035, 0, false, 1,  4,  0),  // 5本螺旋（米弾）
+    new Tmpl("spiral",  0,2, 3.4, 0.085, 0, false, 0,  3, 40),  // 2本速い螺旋
+    new Tmpl("cross",   0,4, 2.6, 0.060, 0, false, 0,  6,  0),  // 十字回転
+    new Tmpl("cross",   0,6, 2.4,-0.045, 0, false, 0,  7, 25),  // 六方回転
+    new Tmpl("fan",     5,0, 3.6, 0,    42, true,  2, 16,  0),  // 自機狙い5way（大玉）
+    new Tmpl("fan",     7,0, 3.2, 0,    66, true,  0, 18,  0),  // 自機狙い7way
+    new Tmpl("fan",     3,0, 4.4, 0,    16, true,  1, 10,  0),  // 速い3way連射
+    new Tmpl("flower", 24,1, 2.6, 0.045, 0, false, 0, 14,  0),  // 花弁（速度交互）
+    new Tmpl("flower", 16,1, 2.4,-0.050, 0, false, 2, 15, 30),  // 花弁2
+    new Tmpl("arc",    12,0, 2.7, 0,    72, true,  0, 19,  0),  // 湾曲アーク
+    new Tmpl("arc",    16,0, 2.5, 0,    96, true,  1, 21, 20),  // 広い湾曲アーク
+    new Tmpl("wall",   14,0, 2.7, 0,     0, false, 0, 26,  0),  // 隙間スイープ壁
+    new Tmpl("wall",   11,0, 3.1, 0,     0, false, 0, 30, 15),  // 速い壁
+  };
+  // 雑魚級：シンプルで意図の読める弾（自機狙い中心）
+  static final Tmpl[] ENEMY_DESIGNS = {
+    new Tmpl("fan", 1,0, 3.0, 0,  0, true, 0, 0, 0),   // 単発狙い
+    new Tmpl("fan", 3,0, 2.8, 0, 30, true, 0, 0, 0),   // 3way狙い
+    new Tmpl("fan", 5,0, 2.6, 0, 50, true, 0, 0, 0),   // 5way狙い
+    new Tmpl("fan", 2,0, 3.3, 0, 16, true, 1, 0, 0),   // 2way速い
+    new Tmpl("ring",10,1, 2.2, 0,     0, false, 0, 0, 0),  // 小リング
+    new Tmpl("ring", 8,1, 2.4, 0.10,  0, false, 0, 0, 0),  // 回転小リング
+  };
+  final java.util.HashSet<Integer> usedDesign = new java.util.HashSet<>();
+  int enemyDesignRot = 0;
+
+  Pattern fromTmpl(Tmpl tm, double hue, double power){
+    Diff d = diff();
+    Pattern p = new Pattern();
+    p.type = tm.type; p.aim = tm.aim; p.spin = tm.spin;
+    p.spread = Math.toRadians(tm.spreadDeg);
+    p.hue = ((hue + tm.hueOff)%360+360)%360;
+    p.bulletKind = tm.kind;
+    p.size = tm.kind==2 ? 7.0 : tm.kind==1 ? 5.5 : 6.0;
+    p.accel = 0; p.curve = 0; p.angle = 0; p.fired = 0;
+    p.interval = Math.max(4, (int)Math.round((tm.interval>0?tm.interval:12) * d.fireMul));
+    if(tm.type.equals("spiral") || tm.type.equals("cross")){
+      p.arms = tm.arms; p.count = 0;
+    } else if(tm.type.equals("fan")){
+      p.count = Math.max(1, tm.count);             // 自機狙いの way 数は設計どおり維持
+    } else {
+      p.count = Math.max(3, (int)Math.round(tm.count * (d.density*0.85 + 0.4)));
+    }
+    p.speed = tm.spd * (0.9 + 0.2*power);          // 弾速は設計値ベース（難易度係数は発射時に乗算）
+    return p;
+  }
+  // ボス弾幕：指定タイプの設計テンプレから、1プレイ内で未使用のものを選ぶ
+  Pattern makeUniquePattern(String biasType, double hue, double power, double aimBias){
+    int best=-1;
+    for(int i=0;i<DESIGNS.length;i++){
+      if(biasType!=null && !DESIGNS[i].type.equals(biasType)) continue;
+      if(!usedDesign.contains(i)){ best=i; break; }
+      if(best<0) best=i;   // 全部使用済みなら先頭を再利用
+    }
+    if(best<0){ for(int i=0;i<DESIGNS.length;i++) if(!usedDesign.contains(i)){ best=i; break; } }
+    if(best<0) best=0;
+    usedDesign.add(best);
+    Pattern p = fromTmpl(DESIGNS[best], hue, power);
+    p.sig = "D"+best; usedPatternSigs.add(p.sig);
+    return p;
+  }
+  // 雑魚弾幕：シンプル設計を順番に（重複可・編隊で揃う）
+  Pattern makeEnemyPattern(double hue, int tier){
+    int idx;
+    if(tier>=3) idx = 4 + (enemyDesignRot % 2);          // ring系
+    else if(tier==2) idx = 1 + (enemyDesignRot % 4);     // 2〜5way / ring
+    else idx = enemyDesignRot % 4;                       // 単発〜2way速い
+    enemyDesignRot++;
+    return fromTmpl(ENEMY_DESIGNS[idx], hue, 0.3 + tier*0.2);
+  }
   static final String[] ENEMY_SHAPES  = {"diamond","triangle","hex","arrow","orb","crab","star","wing"};
 
   /* ---------------- 難易度 ---------------- */
@@ -91,6 +178,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   static class Pattern {
     String type; int count, arms; double speed, spin, spread; boolean aim;
     double hue, size, accel, curve; int interval; double angle; String sig; int bulletKind;
+    int fired;   // 発射回数（壁の隙間スイープ等に使用）
   }
   static class EnemyType {
     String shape; double hue, size; int hp; String move;
@@ -120,11 +208,11 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     BossDef(String n,double h,int hp,double s,String[][] t){name=n;hue=h;this.hp=hp;size=s;types=t;} }
   static final BossDef[] BOSS_DEFS = {
     new BossDef("蒼穹の哨戒機 AURORA",200,2200,46,new String[][]{{"fan","ring"},{"spiral","arc"},{"ring","flower"}}),
-    new BossDef("紅蓮の双角 SCARLET",0,2900,50,new String[][]{{"ring","spiral"},{"fan","aimedBurst"},{"flower","cross"},{"spiral","rain"}}),
-    new BossDef("翠嵐の蟲将 VERDANT",120,3600,54,new String[][]{{"spray","wall"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
-    new BossDef("黄昏の機神 AMBER",42,4400,58,new String[][]{{"spiral","cross"},{"ring","flower"},{"wall","rain"},{"fan","arc"},{"ring","spiral"}}),
-    new BossDef("深淵の咎竜 ABYSS",280,5400,62,new String[][]{{"flower","spiral"},{"cross","ring"},{"rain","wall"},{"arc","fan"},{"spiral","flower"},{"ring","cross"}}),
-    new BossDef("天穹の終焉 STELLAR",320,7200,70,new String[][]{{"ring","spiral"},{"flower","cross"},{"fan","arc"},{"wall","rain"},{"spiral","flower"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
+    new BossDef("紅蓮の双角 SCARLET",0,2900,50,new String[][]{{"ring","spiral"},{"fan","cross"},{"flower","cross"},{"spiral","fan"}}),
+    new BossDef("翠嵐の蟲将 VERDANT",120,3600,54,new String[][]{{"flower","wall"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
+    new BossDef("黄昏の機神 AMBER",42,4400,58,new String[][]{{"spiral","cross"},{"ring","flower"},{"wall","fan"},{"fan","arc"},{"ring","spiral"}}),
+    new BossDef("深淵の咎竜 ABYSS",280,5400,62,new String[][]{{"flower","spiral"},{"cross","ring"},{"fan","wall"},{"arc","fan"},{"spiral","flower"},{"ring","cross"}}),
+    new BossDef("天穹の終焉 STELLAR",320,7200,70,new String[][]{{"ring","spiral"},{"flower","cross"},{"fan","arc"},{"wall","fan"},{"spiral","flower"},{"cross","ring"},{"arc","spiral"},{"flower","fan"}}),
   };
 
   /* ---------------- ステージ情報 ---------------- */
@@ -195,40 +283,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   }
 
   /* ====================================================================
-     ユニーク生成
+     敵タイプ生成
      ==================================================================== */
-  Pattern makeUniquePattern(String biasType, double hue, double power, double aimBias){
-    Diff d = diff();
-    for(int attempt=0; attempt<80; attempt++){
-      Pattern p = new Pattern();
-      p.type = (biasType!=null)? biasType : pick(PATTERN_TYPES);
-      int rawCount = ir(5, (int)Math.round(7 + 13*power));   // 弾数を削減
-      p.count = Math.max(3, (int)Math.round(rawCount * d.density));
-      p.arms = ir(1, 2 + (int)Math.round(2*power));
-      p.speed = rr(1.4, 1.8 + 1.5*power);                    // 弾速（避けやすさ重視で控えめ）
-      p.spin = rr(-0.10, 0.10);
-      p.spread = rr(Math.PI*0.18, Math.PI*0.85);
-      p.aim = rng.nextDouble() < aimBias;
-      p.hue = (hue<0)? ir(0,359) : ((hue + ir(-30,30))%360+360)%360;
-      p.size = q(rr(5.0,8.0),0.5);
-      p.accel = rr(0.0, 0.03) * power;                       // 減速なし（止まる弾を排除）
-      p.curve = (rng.nextDouble()<0.22)? rr(-0.025,0.025) : 0;
-      p.interval = (int)Math.round(ir(8,18) * d.fireMul);
-      p.angle = rr(0,Math.PI*2);
-      if(p.type.equals("fan")||p.type.equals("aimedBurst")||p.type.equals("rain")) p.aim=true;
-      if(p.type.equals("wall")){ p.count=ir(8,14); p.aim=false; }
-      p.bulletKind = (p.size>=7)? 2 : (rng.nextDouble()<0.40?1:0);   // 0=玉 1=米弾 2=大玉
-      String sig = String.join("|", p.type, ""+p.count, ""+p.arms, ""+p.bulletKind,
-        ""+q(p.speed,0.25), ""+q(p.spin,0.02), ""+q(p.spread,0.15),
-        p.aim?"1":"0", ""+q(p.hue,15), ""+p.size, ""+q(p.accel,0.01), ""+q(p.curve,0.01));
-      if(!usedPatternSigs.contains(sig)){ usedPatternSigs.add(sig); p.sig=sig; return p; }
-    }
-    Pattern p = new Pattern(); p.type="ring"; p.count=ir(8,20); p.arms=1; p.speed=2;
-    p.spin=rr(-.1,.1); p.spread=Math.PI; p.aim=false; p.hue=ir(0,359); p.size=6;
-    p.accel=0; p.curve=0; p.interval=12; p.angle=rr(0,7);
-    p.sig="fb"+usedPatternSigs.size(); usedPatternSigs.add(p.sig); return p;
-  }
-
   EnemyType makeUniqueEnemyType(double hue, int tier, String moveBias, String shapeBias){
     EnemyType g=null;
     for(int attempt=0; attempt<80; attempt++){
@@ -253,9 +309,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(g==null){ g=new EnemyType(); g.shape="orb"; g.hue=ir(0,359); g.size=18; g.hp=4;
       g.move="straight"; g.moveSpeed=2; g.amp=60; g.freq=0.03; g.detailSeed=rng.nextLong();
       g.fireCd=80; g.score=100; g.tier=tier; g.sig="ef"+usedEnemySigs.size(); }
-    int pc = g.tier==1?1:(g.tier==2?(rng.nextBoolean()?1:2):2);
+    int pc = g.tier==1?1:2;
     g.patterns = new Pattern[pc];
-    for(int i=0;i<pc;i++) g.patterns[i] = makeUniquePattern(null, g.hue, 0.28 + g.tier*0.18, g.tier==1?0.55:0.45);
+    for(int i=0;i<pc;i++) g.patterns[i] = makeEnemyPattern(g.hue, g.tier);
     return g;
   }
 
@@ -268,8 +324,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     v.detailSeed = g.detailSeed ^ (i*0x9E3779B1L);
     v.moveSpeed=g.moveSpeed; v.amp=g.amp + ir(-15,15);
     v.freq=q(g.freq + rr(-0.006,0.006),0.001);
-    v.patterns = new Pattern[g.patterns.length];
-    for(int k=0;k<v.patterns.length;k++) v.patterns[k]=makeUniquePattern(null, v.hue, 0.28+g.tier*0.18, 0.5);
+    v.patterns = g.patterns;   // 編隊は同じ設計弾幕を共有（揃って撃つ＝意図が見える）
     v.sig=g.sig+"#"+i;
     return v;
   }
@@ -306,7 +361,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         for(int i=0;i<p.count;i++) spawnEB(x,y,base+i*step,p,(i%2==1)?1.5:0.85,1); break; }
       case "spray": { int n=Math.max(3,(int)Math.round(p.count*0.4));
         for(int i=0;i<n;i++) spawnEB(x,y,aim+(rng.nextDouble()-0.5)*p.spread,p,0.7+rng.nextDouble()*0.7,1); break; }
-      case "wall": { double span=W*0.9; int n=p.count, gap=ir(0,n-1);
+      case "wall": { double span=W*0.9; int n=p.count;
+        int sweep=p.fired % (2*(n-1)); int gap = sweep<n ? sweep : (2*(n-1)-sweep);  // 隙間を左右に往復スイープ
         for(int i=0;i<n;i++){ if(Math.abs(i-gap)<=1) continue; double bx=W*0.05+span*((double)i/(n-1));
           spawnEBraw(bx,y,downA,p.speed*0.9,0.02,p.size,p.hue,p.bulletKind);} break; }
       case "rain": { int n=Math.max(2,(int)Math.round(p.count*0.25));
@@ -321,6 +377,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
           if(enemyBullets.size()<2000) enemyBullets.add(b);} break; }
     }
     p.angle += p.spin;
+    p.fired++;
   }
 
   /* ====================================================================
@@ -830,7 +887,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     clearJust();
   }
   void startNewGame(){
-    usedPatternSigs.clear(); usedEnemySigs.clear(); usedSpellNames.clear();
+    usedPatternSigs.clear(); usedEnemySigs.clear(); usedSpellNames.clear(); usedDesign.clear(); enemyDesignRot=0;
     rng = new Random();
     score=0; lives=diff().lives; bombs=diff().bombs; power=0; stageIndex=0; grazeCount=0;
     resetPlayer();
@@ -1286,7 +1343,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     centerStr(g2,"低速(当たり判定表示): Shift    ポーズ: P    ミュート: M",CX,H-88);
     g2.setColor(new Color(58,86,127)); g2.setFont(new Font("SansSerif",Font.PLAIN,12));
     centerStr(g2,"HI-SCORE  "+pad(hiscore,8),CX,H-52);
-    centerStr(g2,"敵も弾幕も自動生成 — 二度と同じものは出現しません",CX,H-30);
+    centerStr(g2,"敵も弾幕も自動生成 — 1プレイ中は同じものが出ません",CX,H-30);
   }
   void drawHelp(Graphics2D g2){
     g2.setColor(new Color(6,9,22)); g2.fillRect(0,0,VW,H);
@@ -1300,7 +1357,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       "◆ システム","　 赤P=パワーアップ(最大Lv.5)  黄•=得点","　 青B=ボム増加  緑1=残機増加",
       "　 難易度はメニューで EASY / NORMAL / HARD 選択可","",
       "◆ 特徴","　 敵と弾幕はすべて自動生成され、シグネチャ照合で",
-      "　 「二度と同じ敵・同じ弾幕」が出ないよう保証。","",
+      "　 1プレイ中は「同じ敵・同じ弾幕」が出ないよう保証。","",
       "Z / Enter で戻る",
     };
     double y=140;
@@ -1385,7 +1442,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     centerStr(g2,"出現した固有の敵タイプ: "+usedEnemySigs.size()+" 種",CX,492);
     centerStr(g2,"出現した固有の弾幕: "+usedPatternSigs.size()+" 種",CX,518);
     centerStr(g2,"出現したスペルカード: "+usedSpellNames.size()+" 種",CX,544);
-    centerStr(g2,"（すべて互いに異なるパターンでした）",CX,570);
+    centerStr(g2,"（この1プレイ中はすべて異なるパターンでした）",CX,570);
     g2.setColor(new Color(159,200,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,16)); centerStr(g2,"Z / Enter でタイトルへ",CX,624);
   }
 
