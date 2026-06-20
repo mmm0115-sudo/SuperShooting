@@ -1,0 +1,9 @@
+# ビルド生成物
+*.class
+/灯火回廊.jar
+
+# macOS / エディタ
+.DS_Store
+
+# HTML 版時代の Chrome プロファイル（不要）
+.chrome-profile/
