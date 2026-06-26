@@ -5,21 +5,37 @@
 軌道上に放棄された巨大ステーション「回廊（コリドー）」。その最深部に眠る、
 消えかけた地上文明を再起動できる最後のコア。暴走した6層の自動防衛を、
 使い捨ての単機「ランタン号」で下層から最上層へ突破する縦スクロール弾幕シューティング。
-Mac でネイティブに動く **Java（Swing / Java2D）**製、ブラウザ不要。
+**Java（Swing / Java2D）**製・ブラウザ不要。**Mac / Windows / Linux** で動作（Java 17 以降）。
 
 ## 起動方法
+
+### macOS
 - **`StellarCascade.app`** をダブルクリック（タイトルは「灯火回廊」）。
   - 初回に開けない場合は **右クリック →「開く」→「開く」** を一度。
 - 予備：**`灯火回廊を起動.command`** をダブルクリック。
-- CLI：`java -jar 灯火回廊.jar`
+
+### Windows
+- **`灯火回廊.jar`** と **`灯火回廊.bat`** を同じフォルダに置き、**`灯火回廊.bat` をダブルクリック**。
+  - もしくは `灯火回廊.jar` を直接ダブルクリック（.jar が Java に関連付けられていれば起動）。
+  - **Java 17 以降が必要**（無ければ https://adoptium.net/ からインストール）。
+  - 日本語フォント（游ゴシック/游明朝/メイリオ等）は自動で選択。無くても論理フォントで表示。
+
+### 共通（CLI）
+```bash
+java -jar 灯火回廊.jar
+```
+> 注：macOS用の `.app` / `.command` は **`-Xdock:name` や Metal パイプライン指定（mac専用）** を含むため Windows では使いません。Windows は上記 `.bat` / `java -jar` を使ってください。
 
 ## ソースからビルド
+ソースは `src/` 配下のパッケージ（`game` / `entity` / `bullet` / `render` / `util` ＋ `Main`）。
 ```bash
-javac 灯火回廊.java
-jar cfe 灯火回廊.jar StellarCascade *.class
-cp 灯火回廊.jar StellarCascade.app/Contents/Resources/
-java StellarCascade selftest   # 動作検証（TEST_OK 表示で正常）
+javac -d out $(find src -name '*.java')                 # 全パッケージをコンパイル
+java -Djava.awt.headless=true -cp out Main selftest     # 動作検証（TEST_OK 表示で正常）
+jar cfe 灯火回廊.jar Main -C out .                       # 可搬jar（Main-Class=Main）。Win/Linuxはこれを配布
+cp 灯火回廊.jar StellarCascade.app/Contents/Resources/  # （macのみ）.appに同梱
 ```
+> Windows へは **`灯火回廊.jar` と `灯火回廊.bat`** をコピーすれば動きます（`.app`/`.command` は不要）。
+> Windows（コマンドプロンプト）でビルドする場合は `dir /s /b src\*.java > sources.txt && javac -d out @sources.txt` 等。
 
 ## 操作
 | 操作 | キー |
@@ -68,7 +84,8 @@ java StellarCascade selftest   # 動作検証（TEST_OK 表示で正常）
 サイドバー下部に **FPS**（緑=快適/黄=低下/赤=処理落ち）。
 
 ## 動作環境
-- macOS / Java 17 以降（このマシンは OpenJDK 25）。追加ライブラリ不要。
-- Windows：理屈上 `java -jar 灯火回廊.jar` で動く見込みだが**未確認・無保証**。
+- **macOS / Windows / Linux** 共通。**Java 17 以降**のみ（外部ライブラリ不要）。
+- コードは純 Java（Swing / Java2D / javax.sound）で OS 依存処理なし。記録は `~/.tomoshibi_records` に保存。
+- ※ Windows 実機での最終確認は未実施ですが、mac専用フラグを起動側から除外し、フォントも自動フォールバックするよう調整済みです。
 
 楽しんでください。

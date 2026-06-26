@@ -1,5 +1,6 @@
 # ビルド生成物
 *.class
+/out/
 /灯火回廊.jar
 
 # macOS / エディタ

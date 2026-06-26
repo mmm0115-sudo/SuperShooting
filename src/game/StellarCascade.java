@@ -7,6 +7,8 @@
    実行:       java StellarCascade
    自己テスト: java StellarCascade selftest
    ======================================================================= */
+package game;
+
 import javax.swing.*;
 import java.awt.*;
 import java.awt.geom.*;
@@ -16,8 +18,12 @@ import java.util.*;
 import java.util.List;
 import javax.sound.sampled.*;
 import java.io.*;
+import bullet.*;
+import entity.*;
+import util.*;
+import static render.Colors.*;
 
-class StellarCascade extends JPanel implements ActionListener, KeyListener {
+public class StellarCascade extends JPanel implements ActionListener, KeyListener {
   static final int W = 720, H = 960;       // プレイフィールド
   static final int SIDEW = 280;            // 右サイドバー幅
   static final int VW = W + SIDEW;          // 仮想キャンバス全幅（1000）
@@ -39,6 +45,8 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     KEYS.put("pause", new int[]{KeyEvent.VK_P, KeyEvent.VK_ESCAPE});
     KEYS.put("mute",  new int[]{KeyEvent.VK_M});
     KEYS.put("rewind",new int[]{KeyEvent.VK_R, KeyEvent.VK_C});
+    KEYS.put("volup", new int[]{KeyEvent.VK_EQUALS, KeyEvent.VK_CLOSE_BRACKET, KeyEvent.VK_RIGHT_PARENTHESIS});
+    KEYS.put("voldn", new int[]{KeyEvent.VK_MINUS, KeyEvent.VK_OPEN_BRACKET});
     KEYS.put("quit",  new int[]{KeyEvent.VK_Q});
     KEYS.put("ldiff", new int[]{KeyEvent.VK_LEFT, KeyEvent.VK_A});
     KEYS.put("rdiff", new int[]{KeyEvent.VK_RIGHT, KeyEvent.VK_D});
@@ -61,12 +69,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   /* ---- 手で作り込んだ弾幕テンプレート（ランダムではなく設計済み） ----
      count=弾数(リング/扇等) arms=本数(螺旋/十字) spd=基準弾速 spin=毎回の回転
      spreadDeg=扇の角度 aim=自機狙い kind=弾種(0玉1米2大玉) interval=連射間隔 hueOff=色相オフセット */
-  static class Tmpl {
-    String type; int count,arms; double spd,spin,spreadDeg; boolean aim; int kind,interval,hueOff;
-    Tmpl(String t,int c,int a,double s,double sp,double spr,boolean ai,int k,int iv,int ho){
-      type=t;count=c;arms=a;spd=s;spin=sp;spreadDeg=spr;aim=ai;kind=k;interval=iv;hueOff=ho;
-    }
-  }
   // ボス級：綺麗な対称性・一定の回転・読める隙間を持つ設計弾幕
   static final Tmpl[] DESIGNS = {
     new Tmpl("ring",   20,1, 2.6, 0.12,  0, false, 0, 11,  0),  // 回転リング
@@ -107,7 +109,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     p.spread = Math.toRadians(tm.spreadDeg);
     p.hue = ((hue + tm.hueOff)%360+360)%360;
     p.bulletKind = tm.kind;
-    p.size = tm.kind==2 ? 7.0 : tm.kind==1 ? 5.5 : 6.0;
+    p.size = tm.kind==2 ? 9.5 : tm.kind==1 ? 7.0 : 8.0;   // 弾サイズ大きめ
     p.accel = 0; p.curve = 0; p.angle = 0; p.fired = 0;
     p.interval = Math.max(4, (int)Math.round((tm.interval>0?tm.interval:12) * d.fireMul));
     if(tm.type.equals("spiral") || tm.type.equals("cross")){
@@ -147,12 +149,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   static final String[] ENEMY_SHAPES  = {"diamond","triangle","hex","arrow","orb","crab","star","wing"};
 
   /* ---------------- 難易度 ---------------- */
-  static class Diff {
-    String name; double bulletSpeed, density, fireMul, stageScale, aimErr; int lives, bombs;
-    Diff(String n,double bs,double d,double f,double err,double ss,int l,int b){
-      name=n;bulletSpeed=bs;density=d;fireMul=f;aimErr=err;stageScale=ss;lives=l;bombs=b;
-    }
-  }
   // 共通スケーリング表（基準＝Normal）: 弾速×0.75/1.0/1.2/1.45  密度×0.6/1.0/1.4/1.9  間隔×1.4/1.0/0.8/0.6
   static final Diff[] DIFFS = {
     new Diff("EASY",    0.75, 0.6, 1.4, 10, 0.05, 5, 4),
@@ -176,8 +172,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   /* ---------------- 機体・ショット選択 ---------------- */
   static final double POC_LINE = 260;     // この高さより上に行くと全アイテム自動回収
   double curStageHpMul = 1;
-  static class PChar { String name,desc; double speed,focus,hitr,dmgMul,hue;
-    PChar(String n,String d,double s,double f,double h,double dm,double hu){name=n;desc=d;speed=s;focus=f;hitr=h;dmgMul=dm;hue=hu;} }
   // 自機「ランタン号」の装備（焰の単機侵入機）
   // ランタン号の灯火（ともしび）3種
   static final PChar[] CHARS = {
@@ -189,38 +183,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   static final String[] SHOT_DESC  = {"広く灯を散らす","正面に灯を束ねる","灯が敵を追う"};
   int charSel=0, shotSel=0, selRow=0;
 
-  /* ---------------- エンティティ ---------------- */
-  static class Pattern {
-    String type; int count, arms; double speed, spin, spread; boolean aim;
-    double hue, size, accel, curve; int interval; double angle; String sig; int bulletKind;
-    int fired;   // 発射回数（壁の隙間スイープ等に使用）
-  }
-  static class EnemyType {
-    String shape; double hue, size; int hp; String move;
-    double moveSpeed, amp, freq; int fireCd, score, tier; long detailSeed;
-    Pattern[] patterns; String sig;
-  }
-  static class Enemy {
-    EnemyType g; double x,y,sx,sy; int t; int hp,maxhp; double fireT; int patIdx;
-    double targetY; int hitFlash; boolean dead; int dir; int fireBudget=999;  // 残り発射回数
-  }
-  static class Bullet {
-    double x,y,angle,speed,accel,curve,r,hue; int life,kind; boolean grazed; double turned;
-    int mode;                 // 0通常 1停止→再加速 2誘導 3波(サイン) 4重力
-    int delay; double da,dsp; // mode1: 停止フレーム / 解除後の角度・速度
-    double homTurn; int homTime;       // mode2: 旋回率・誘導持続
-    double sineAmp,sineFreq,baseAngle,sx0,sy0,dist;  // mode3
-    double grav;              // mode4: 自機への引力(rad/frame)
-    int splitT,splitN,splitKind; double splitSpd;    // 分裂(0=なし)
-  }
-  // 予告線つきレーザー（壁・走査・回転刃に使用）
-  static class Laser {
-    double x,y,angle,len,width,hue,spin,vx,vy; int tele,active,t; boolean done,anchor;
-  }
-  static class PBullet { double x,y,vx,vy,r; int dmg; boolean homing; }
-  static class Item { double x,y,vx,vy,r; int t; String type; boolean dead; }
-  static class Particle { double x,y,vx,vy,life,decay,r,hue; boolean star; }
-  static class Floater { double x,y,life,hue; String txt; }
+  /* ---------------- エンティティは entity/ ・ bullet/ パッケージへ分離 ---------------- */
 
   /* ---------------- 残響リワインド用：状態のディープコピー ---------------- */
   static Bullet cpB(Bullet o){ Bullet b=new Bullet();
@@ -229,7 +192,8 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     b.homTurn=o.homTurn;b.homTime=o.homTime;b.sineAmp=o.sineAmp;b.sineFreq=o.sineFreq;b.baseAngle=o.baseAngle;b.sx0=o.sx0;b.sy0=o.sy0;b.dist=o.dist;
     b.grav=o.grav;b.splitT=o.splitT;b.splitN=o.splitN;b.splitKind=o.splitKind;b.splitSpd=o.splitSpd; return b; }
   static Enemy cpE(Enemy o){ Enemy e=new Enemy(); e.g=o.g;e.x=o.x;e.y=o.y;e.sx=o.sx;e.sy=o.sy;e.t=o.t;e.hp=o.hp;e.maxhp=o.maxhp;
-    e.fireT=o.fireT;e.patIdx=o.patIdx;e.targetY=o.targetY;e.hitFlash=o.hitFlash;e.dead=o.dead;e.dir=o.dir;e.fireBudget=o.fireBudget; return e; }
+    e.fireT=o.fireT;e.patIdx=o.patIdx;e.targetY=o.targetY;e.hitFlash=o.hitFlash;e.dead=o.dead;e.dir=o.dir;e.fireBudget=o.fireBudget;
+    e.drone=o.drone;e.ox=o.ox;e.oy=o.oy; return e; }
   static Item cpI(Item o){ Item i=new Item(); i.x=o.x;i.y=o.y;i.vx=o.vx;i.vy=o.vy;i.r=o.r;i.t=o.t;i.type=o.type;i.dead=o.dead; return i; }
   static Laser cpL(Laser o){ Laser l=new Laser(); l.x=o.x;l.y=o.y;l.angle=o.angle;l.len=o.len;l.width=o.width;l.hue=o.hue;l.spin=o.spin;l.vx=o.vx;l.vy=o.vy;l.tele=o.tele;l.active=o.active;l.t=o.t;l.done=o.done;l.anchor=o.anchor; return l; }
   static Boss cpBoss(Boss o){ if(o==null) return null; Boss b=new Boss();
@@ -237,13 +201,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     b.atks=o.atks;b.atkIdx=o.atkIdx;b.atkT=o.atkT;b.spell=o.spell;b.spellName=o.spellName;b.captured=o.captured;b.timeLimit=o.timeLimit;
     b.declTimer=o.declTimer;b.invuln=o.invuln;b.mtx=o.mtx;b.mty=o.mty;b.moveT=o.moveT;b.entering=o.entering;b.dead=o.dead;b.deathTimer=o.deathTimer;
     b.t=o.t;b.hitFlash=o.hitFlash;b.spinAng=o.spinAng;b.f1=o.f1;b.f2=o.f2;b.s1=o.s1;b.s2=o.s2;b.invincible=o.invincible;b.luxPhase=o.luxPhase;b.luxTimer=o.luxTimer; return b; }
-  static class Snapshot {
-    double px,py; int pInvuln,pBombTimer,pShotCd,pDeathTimer; boolean pDead;
-    int lives,bombs,power,score,grazeCount,stageTimer;
-    ArrayList<Bullet> eb=new ArrayList<>(); ArrayList<Enemy> en=new ArrayList<>();
-    ArrayList<Item> it=new ArrayList<>(); ArrayList<Laser> lz=new ArrayList<>(); Boss boss;
-  }
-
   /* ---------------- ボス／攻撃定義（通常↔スペル交互・通常は名前非表示） ---------------- */
   // 攻撃スクリプトID
   static final int AIM3=1, SNIPE=2,
@@ -254,10 +211,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     C_RINGAIM=60, C_CONCERTO=61, C_SPIHOM=62, C_PHANTOM=63, C_RINGLZ=64, C_REVEL=65,
     C_SPIDELAY=66, C_ZENITH=67, C_DRINGROT=68, C_FINSEQ=69, C_TOTAL=70, C_LANTERN=71,
     LUX_L1=80;
-  static class Atk { boolean spell; String name; int script; double sec;
-    Atk(boolean sp,String n,int sc,double s){spell=sp;name=n;script=sc;sec=s;} }
-  static class BossInfo { String name; double hue,size; int hp; Atk[] atks;
-    BossInfo(String n,double hu,double sz,int hp,Atk[] a){name=n;hue=hu;size=sz;this.hp=hp;atks=a;} }
   static Atk N(String n,int s,double sec){ return new Atk(false,n,s,sec); }
   static Atk S(String n,int s,double sec){ return new Atk(true ,n,s,sec); }
   static final BossInfo[] BOSSES = {
@@ -284,25 +237,13 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     new BossInfo("ルクス",45,66,9000,new Atk[]{
       N("複合斉射",C_RINGAIM,16), S("協奏",C_CONCERTO,28),
       N("乱舞",C_SPIHOM,16), S("幻影回路",C_PHANTOM,28),
-      N("交差砲火",C_RINGLZ,16), S("狂宴",C_REVEL,28),
+      N("交差砲火",C_RINGLZ,16), S("灯の紋章",C_REVEL,28),
       N("狂想曲",C_SPIDELAY,16), S("天頂砲",C_ZENITH,28),
       N("輪舞",C_DRINGROT,16), S("終焉",C_FINSEQ,30),
       N("総力",C_TOTAL,16), S("灯火回廊",C_LANTERN,40)}),
   };
 
-  static class Boss {
-    int idx; String name; double hue,size; double x,y,ty;
-    int totalHp, hp, segHp; Atk[] atks; int atkIdx, atkT;
-    boolean spell; String spellName=""; boolean captured=true;
-    int timeLimit, declTimer, invuln; double mtx,mty; int moveT;
-    boolean entering=true, dead; int deathTimer, t, hitFlash;
-    double spinAng, f1, f2; int s1, s2;            // スクリプト用スクラッチ
-    boolean invincible; int luxPhase, luxTimer;     // ルナ専用L1/L2
-    Atk cur(){ return atks[atkIdx]; }
-  }
-
   /* ---------------- ステージ情報（6層） ---------------- */
-  static class StageInfo { String name,sub; double bg; StageInfo(String n,String s,double b){name=n;sub=s;bg=b;} }
   static final StageInfo[] STAGE_INFO = {
     new StageInfo("第1層","入口防衛AI ゲート",      35),
     new StageInfo("第2層","散布制御AI ブルーム",   190),
@@ -363,6 +304,8 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   static final int SNAP_EVERY=3;                // 何フレーム毎に記録するか
   java.util.ArrayDeque<Snapshot> snaps = new java.util.ArrayDeque<>();
   boolean echoUsed; int rwUsesLeft; int rwCD, rewindFx;
+  boolean continued; int continueCount;   // コンティニュー使用（正規踏破でなくなる）
+  boolean clean(){ return !echoUsed && !continued; }   // ノーリワインド＆ノーコンティニュー
   int bombFx; double bombX, bombY;   // ボム演出（衝撃波）
   boolean midbossActive; Enemy midbossRef;   // 中ボス中は他の敵を出さない
   boolean midbossPending; int midbossPendingIdx, midbossPendingT;   // 場が空くまで中ボスを待機
@@ -376,9 +319,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   int modeSel=0;
   static final String[] MODES={"本編","回廊無限","灯火・制限時間","無音","弾幕鑑賞"};
   double stageDiff = 1, shake, flash;
-  // ステージ進行
-  static class Ev { int t; Runnable fn; Ev(int t,Runnable f){this.t=t;fn=f;} }
-  static class StageRunner { List<Ev> events; int idx; int finalTime; }
+  // ステージ進行（Ev / StageRunner は util/ パッケージ）
   StageRunner stageRunner;
   List<Ev> delayed = new ArrayList<>();
 
@@ -531,14 +472,19 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   }
   void updateEnemy(Enemy e){
     e.t++; EnemyType g=e.g; double sp=g.moveSpeed;
-    switch(g.move){
-      case "straight": e.y+=sp; break;
-      case "sine": e.y+=sp*0.9; e.x=e.sx+Math.sin(e.t*g.freq)*g.amp; break;
-      case "swoop": if(e.y<e.targetY) e.y+=sp*1.6; else e.x+=Math.cos(e.t*g.freq)*sp*1.4*e.dir; break;
-      case "arc": e.x+=Math.cos(e.t*0.02)*sp*e.dir; e.y+=Math.sin(e.t*0.02)*sp*0.6+0.3; break;
-      case "hover": if(e.y<e.targetY) e.y+=sp; else e.x=e.sx+Math.sin(e.t*g.freq)*g.amp; break;
-      case "drift": e.y+=sp*0.5; e.x+=Math.sin(e.t*g.freq)*1.5*e.dir; break;
-      case "dart": if(e.y<e.targetY) e.y+=sp*2.2; else e.x+=sp*1.8*e.dir; break;
+    if(e.drone){                       // ボス随伴ドローン：ボス位置＋オフセットへ追従（ボスと一緒に動く）
+      if(boss!=null && !boss.dead){ e.x += (boss.x+e.ox - e.x)*0.06; e.y += (boss.y+e.oy - e.y)*0.06; }
+      else e.dead=true;                // ボスがいなくなったら退場
+    } else {
+      switch(g.move){
+        case "straight": e.y+=sp; break;
+        case "sine": e.y+=sp*0.9; e.x=e.sx+Math.sin(e.t*g.freq)*g.amp; break;
+        case "swoop": if(e.y<e.targetY) e.y+=sp*1.6; else e.x+=Math.cos(e.t*g.freq)*sp*1.4*e.dir; break;
+        case "arc": e.x+=Math.cos(e.t*0.02)*sp*e.dir; e.y+=Math.sin(e.t*0.02)*sp*0.6+0.3; break;
+        case "hover": if(e.y<e.targetY) e.y+=sp; else e.x=e.sx+Math.sin(e.t*g.freq)*g.amp; break;
+        case "drift": e.y+=sp*0.5; e.x+=Math.sin(e.t*g.freq)*1.5*e.dir; break;
+        case "dart": if(e.y<e.targetY) e.y+=sp*2.2; else e.x+=sp*1.8*e.dir; break;
+      }
     }
     if(e.hitFlash>0) e.hitFlash--;
     if(e.y>0 && e.y<H*0.8 && e.fireBudget>0){
@@ -549,7 +495,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         e.fireT = p.interval * ir(2,5);
       }
     }
-    if(e.y>H+60 || e.x<-80 || e.x>W+80) e.dead=true;
+    if(!e.drone && (e.y>H+60 || e.x<-80 || e.x>W+80)) e.dead=true;
   }
 
   /* ====================================================================
@@ -558,7 +504,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   /* ---- 弾の生成ヘルパ（速度はpx/s設計値を渡す→bs()で実機px/frameへ） ---- */
   Bullet mkB(double x,double y,double ang,double spdFrame,int kind,double hue){
     Bullet b=new Bullet(); b.x=x;b.y=y;b.angle=ang;b.speed=spdFrame;
-    b.r = kind==2?7:kind==1?5.5:6; b.hue=((hue%360)+360)%360; b.kind=kind;
+    b.r = kind==2?9.5:kind==1?7:8; b.hue=((hue%360)+360)%360; b.kind=kind;   // 弾サイズ大きめ
     if(enemyBullets.size()<2200) enemyBullets.add(b);
     return b;
   }
@@ -592,8 +538,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     b.atkT=0; b.spinAng=0; b.s1=0; b.s2=0; b.f1=0; b.f2=0;
     b.spell = b.cur().spell;
     b.timeLimit = (int)Math.round(b.cur().sec*60);
-    // 各攻撃の体力は制限時間に比例（厚めにして“弾幕を見せる時間”を確保＝戦闘を長く）
-    b.segHp = Math.max(1200, (int)Math.round(b.cur().sec*60 * (13.0 + diffIdx*3.0)));
+    // 通常は薄く、スペルは適度に（倒し切って次へ進めるHPに調整）
+    double k = b.spell ? (2.4 + diffIdx*0.7) : (1.1 + diffIdx*0.4);
+    b.segHp = Math.max(b.spell?600:300, (int)Math.round(b.cur().sec*60 * k));
     b.captured = true; b.hp = b.segHp; b.invuln = 36;
     bulletCancelToStars(); lasers.clear();
     if(b.spell){ b.spellName = b.name+"「"+b.cur().name+"」"; b.declTimer=78; sound.spellDeclare(); }
@@ -607,9 +554,11 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   void bossAdvance(Boss b, boolean captured){
     if(b.spell && captured) awardSpell(b);
     bulletCancelToStars(); lasers.clear(); shake=12; flash=0.35;
+    for(int i=0;i<5;i++){ Item it=new Item(); it.x=b.x+rr(-50,50); it.y=b.y; it.type="power";   // 攻撃突破ごとにパワー入手
+      it.vy=-1.6-rng.nextDouble(); it.vx=rr(-1.5,1.5); it.r=5; items.add(it); }
     b.atkIdx++;
     if(b.atkIdx >= b.atks.length){
-      if(b.idx==5 && isLunatic() && b.luxPhase==0){ luxEnterL1(b); return; }
+      if(b.idx==5 && isLunatic() && clean() && b.luxPhase==0){ luxEnterL1(b); return; }   // 真ラストはノーリワインド＆ノーコンティニュー時のみ
       b.dead=true; b.deathTimer=0; onBossDefeated(); return;
     }
     bossStartAtk(b);
@@ -624,12 +573,14 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     if(b.dead){ b.deathTimer++; return; }
     if(b.invuln>0) b.invuln--;
     b.x += (b.mtx-b.x)*0.02; b.y += (b.mty-b.y)*0.02; b.moveT++;
+    if(b.declTimer<=0 && b.t%360==0){ b.mtx=150+Math.random()*(W-300); b.mty=100+Math.random()*90; }  // たまに移動（弾幕中でも）
     // ルナ専用フェーズ
     if(b.luxPhase==1){ luxL1(b); return; }
     if(b.declTimer>0){ b.declTimer--; if(b.declTimer==0 && !b.spell){} return; }  // 宣言中は撃たない
     b.atkT++;
     runBossScript(b);
-    // 時間制限なし：各攻撃はHPを削り切るまで継続（bossTakeDamageで進行）
+    // 基本はHPを削り切って進行。ただし長く詰まらないよう保険のタイムアウト（45秒）で必ず次へ。
+    if(b.atkT > 45*60){ b.captured=false; bossAdvance(b,false); }
   }
   void bossTakeDamage(Boss b,int dmg){
     if(practiceMode) return;     // 弾幕鑑賞ではボスは倒れない（時間で循環）
@@ -665,7 +616,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         if(t%ivl(0.30)==0){ int n=dcnt(20); ring(b,n,150,b.spinAng,1,0); b.spinAng+=Math.PI*2/n/2; }
         break;
       case DRING:
-        if(t%ivl(1.6)==0){ int n=dcnt(18); ring(b,n,130,0,0,0); ring(b,n,162,Math.PI/n,2,30); }
+        if(t%ivl(1.6)==0){ int n=dcnt(18); double rot=b.spinAng; ring(b,n,130,rot,0,0); ring(b,n,162,rot+Math.PI/n,2,30); b.spinAng+=Math.PI/n*0.6; }
         break;
       case CONTRACT:
         if(t%ivl(1.0)==0){ int n=dcnt(28); double cx=W/2,cy=H*0.40,R=470;
@@ -693,30 +644,33 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
       case TURB:
         if(t%ivl(0.06)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,175,0,0); b.spinAng += Math.toRadians(8 + 11*Math.sin(t*0.06)); }
         break;
-      /* ---- 第4層 グリッド：レーザー・壁 ---- */
-      case LZ_ALT:
-        if(t%ivl(0.9)==0){ boolean left=(b.s1++%2==0); double y0=140+Math.random()*(H*0.55); laser(left?0:W, y0, left?0:Math.PI, teleFrames(), 26, 13, b.hue); }
+      /* ---- 第4層 グリッド：格子・壁（弾幕／ビーム無し） ---- */
+      case LZ_ALT:   // 直線弾列：左右から横へ流れる弾の壁
+        if(t%ivl(1.0)==0) sweepWall(b,160,12+diffIdx,0);
         break;
       case MWALL: emitWall(b,18,(new double[]{4.5,3.5,2.8,2.2})[diffIdx],145); break;
-      case LZ_CROSS:
-        if(t%ivl(1.0)==0){ int te=teleFrames(); double yy=130+Math.random()*(H*0.55), xx=90+Math.random()*(W-180);
-          laser(0,yy,0,te,26,11,b.hue); laser(xx,0,Math.PI/2,te,26,11,b.hue+30); }
+      case LZ_CROSS: // 十字弾：落下壁＋横流し壁を交互に
+        if(t%ivl(1.2)==0) dropWall(b,150,14,0);
+        if((t+ivl(0.6))%ivl(1.2)==0) sweepWall(b,150,12,30);
         break;
-      case PINCER:
+      case PINCER:   // 圧縮挟撃：上下の弾壁＋左右からの弾壁
         if(t%ivl(2.2)==0){ int n=16, gap=3+(int)(Math.random()*(n-8));
           for(int i=0;i<n;i++){ if(i>=gap&&i<gap+4) continue; double bx=W*0.05+(W*0.9)*i/(n-1);
             mkB(bx,-10,Math.PI/2,bs(110),0,b.hue); mkB(bx,H+10,-Math.PI/2,bs(110),0,b.hue); } }
-        if(t%ivl(2.2)==ivl(1.1)){ int te=teleFrames(); laser(0,H*0.5,0,te,30,12,b.hue+20); laser(W,H*0.5,Math.PI,te,30,12,b.hue+20); }
+        if(t%ivl(2.2)==ivl(1.1)) sideWalls(b,120,12,20);
         break;
-      case LZ_SCAN:
-        if(t%ivl(1.0)==0){ boolean l=(b.s1++%2==0); Laser L=laser(l?40:W-40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=(l?bs(180):-bs(180)); }
+      case LZ_SCAN:  // 走査弾：高密度の弾壁が端から薙ぎ払う
+        if(t%ivl(1.0)==0) sweepWall(b,170,15+diffIdx,0);
         break;
       case MAZE: emitMaze(b,20,(new int[]{6,5,4,4})[diffIdx],120); break;
-      case LZ_BLINK:
-        if(t%ivl(0.9)==0){ int g=4+diffIdx; for(int i=0;i<g;i++){ double xx=W*(i+0.5)/g; if(((i+b.s1)%2)==0) laser(xx,0,Math.PI/2,teleFrames(),22,16,b.hue); } b.s1++; }
+      case LZ_BLINK: // 点滅格子：市松模様に弾を出して落とす
+        if(t%ivl(0.85)==0){ int gx=4+diffIdx; double cw=W/(double)gx;
+          for(int i=0;i<gx;i++) if(((i+b.s1)%2)==0) for(int r=0;r<3;r++) mkB(cw*(i+0.5), -10-r*26, Math.PI/2, bs(120), 0, b.hue);
+          b.s1++; }
         break;
-      case ROTLZ:
-        if(t==1){ b.s2=2+diffIdx; for(int k=0;k<b.s2;k++){ Laser L=laser(b.x,b.y,k*Math.PI*2/b.s2,24,1000000,12,b.hue); L.anchor=true; L.spin=Math.toRadians((new double[]{35,55,75,100})[diffIdx])/60.0; } }
+      case ROTLZ:    // 回転弾翼：中心から伸びる弾の腕が扇風機状に回る
+        if(t%ivl(0.05)==0){ int arms=3+diffIdx; for(int k=0;k<arms;k++) arm(b, b.spinAng+k*Math.PI*2/arms, 150, 0, 0);
+          b.spinAng += Math.toRadians((new double[]{4,5,6,7})[diffIdx]); }
         break;
       /* ---- 第5層 エコー：時間差・誘導 ---- */
       case DELAYB:
@@ -735,24 +689,26 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         if(t%wivl==0){ int w=t/wivl; if(w<waves){ int n=dcnt(12)+w*2; for(int i=0;i<n;i++){ double a=i*Math.PI*2/n+w*0.2; Bullet bb=mkB(b.x,b.y,a,0,0,b.hue+w*12); bb.mode=1; bb.delay=(int)Math.round(0.5*60)+(waves-w)*8; bb.dsp=bs(160); } } }
         break; }
       case WAVE:
-        if(t%ivl(0.7)==0){ int n=dcnt(10); double aim=aimAt(b.x,b.y), amp=(new double[]{18,28,40,52})[diffIdx];
-          for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.18; Bullet bb=mkB(b.x,b.y,a,bs(165),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=amp; bb.sineFreq=0.13; } }
+        if(t%ivl(0.55)==0){ int n=dcnt(16); double aim=aimAt(b.x,b.y), amp=(new double[]{18,28,40,52})[diffIdx];
+          for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.16; Bullet bb=mkB(b.x,b.y,a,bs(165),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=amp; bb.sineFreq=0.13; } }
         break;
       case SPLITHOM:
         if(t%ivl(1.6)==0){ int h=2+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.4,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.1+diffIdx*0.5); bb.homTime=80; bb.splitT=(int)Math.round(1.0*60); bb.splitN=2+diffIdx; bb.splitSpd=bs(150); bb.splitKind=0; } }
         break;
       case CHASE:
-        if(t%ivl(0.9)==0){ int n=2+diffIdx*2; double aim=aimAt(b.x,b.y); for(int k=0;k<n;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-n/2.0)*0.5,bs(110),2,b.hue+30); bb.mode=2; bb.homTurn=Math.toRadians(0.8); bb.homTime=320; } }
+        if(t%ivl(0.7)==0){ int n=4+diffIdx*2; double aim=aimAt(b.x,b.y); for(int k=0;k<n;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-n/2.0)*0.4,bs(110),2,b.hue+30); bb.mode=2; bb.homTurn=Math.toRadians(0.8); bb.homTime=320; } }
+        if(t%ivl(1.4)==0) ring(b,dcnt(16),130,t*0.05,0,0);   // 背景の全方位（手薄さ解消）
         break;
       case GRAVITY:
         if(t%ivl(1.2)==0){ int n=dcnt(16); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=4; bb.grav=Math.toRadians(0.5+diffIdx*0.35); } }
         break;
-      case STAGGER:{
-        int per=Math.max(1,(int)Math.round(0.07*60*diff().fireMul));
-        if(t%per==0){ int n=dcnt(16); int pos=(t/per)%(n+8); if(pos<n){ double bx=W*0.08+(W*0.84)*pos/(double)(n-1); mkB(bx,40,Math.PI/2,bs(165),0,b.hue); } }
+      case STAGGER:{   // 時差斉射：左から順に、各列を縦の弾束で（薄さ解消）
+        int per=Math.max(1,(int)Math.round(0.06*60*diff().fireMul));
+        if(t%per==0){ int n=dcnt(18); int pos=(t/per)%(n+6); if(pos<n){ double bx=W*0.07+(W*0.86)*pos/(double)(n-1);
+          for(int r=0;r<2+diffIdx;r++) mkB(bx,20-r*24,Math.PI/2,bs(170),0,b.hue); } }
         break; }
       case ECHOV:
-        if(t%ivl(0.8)==0){ int n=dcnt(8); double aim=aimAt(b.x,b.y); for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.2; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=30; bb.sineFreq=0.13; } }
+        if(t%ivl(0.7)==0){ int n=dcnt(12); double aim=aimAt(b.x,b.y); for(int i=0;i<n;i++){ double a=aim+(i-n/2.0)*0.18; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=3; bb.baseAngle=a; bb.sx0=b.x; bb.sy0=b.y; bb.sineAmp=30; bb.sineFreq=0.13; } }
         if(t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.4,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=120; } }
         { int per=Math.max(1,(int)Math.round(0.08*60*diff().fireMul)); if(t%per==0){ int n=dcnt(14); int pos=(t/per)%(n+8); if(pos<n){ double bx=W*0.1+(W*0.8)*pos/(double)(n-1); mkB(bx,40,Math.PI/2,bs(160),2,b.hue+20); } } }
         break;
@@ -761,7 +717,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         if(t%ivl(1.0)==0){ ring(b,dcnt(18),140,t*0.05,0,0); nway(b,3,150,30,1,40); } break;
       case C_CONCERTO:
         if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); arm(b,b.spinAng+Math.PI,150,0,0); b.spinAng+=Math.toRadians(12); }
-        if(t%ivl(1.2)==0) ring(b,dcnt(16),150,0,2,30);
+        if(t%ivl(1.2)==0) ring(b,dcnt(16),150,t*0.045,2,30);
         if(t%ivl(0.6)==0) nway(b,3,150,24,1,60); break;
       case C_SPIHOM:
         if(t%ivl(0.10)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,150,0,0); b.spinAng+=Math.toRadians(12); }
@@ -770,27 +726,26 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         emitMaze(b,18,(new int[]{6,5,4,4})[diffIdx],120);
         if(t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=130; } }
         if(t%ivl(1.4)==0) ring(b,dcnt(16),140,t*0.04,0,20); break;
-      case C_RINGLZ:
+      case C_RINGLZ:  // リング＋横流し弾壁（ビーム廃止）
         if(t%ivl(1.2)==0) ring(b,dcnt(18),150,t*0.05,0,0);
-        if(t%ivl(1.3)==0){ boolean left=(b.s1++%2==0); double y0=160+Math.random()*(H*0.5); laser(left?0:W,y0,left?0:Math.PI,teleFrames(),24,12,b.hue+20); } break;
-      case C_REVEL:
-        if(t%ivl(0.08)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++){ Bullet bb=mkB(b.x,b.y,b.spinAng+k*Math.PI*2/arms,bs(120),0,b.hue); bb.accel=pf(40); } b.spinAng+=Math.toRadians(12); }
-        if(t%ivl(1.2)==0){ int n=dcnt(20); double cx=W/2,cy=H*0.4,R=470; for(int i=0;i<n;i++){ double a=i*Math.PI*2/n+t*0.05; double bx=cx+Math.cos(a)*R,by=cy+Math.sin(a)*R; mkB(bx,by,Math.atan2(cy-by,cx-bx),bs(130),2,b.hue+30); } } break;
+        if(t%ivl(1.3)==0) sweepWall(b,150,12,20); break;
+      case C_REVEL:   // 灯の紋章：弾で形（同心リング）を作って一定時間後に崩す
+        shapeFormCollapse(b); break;
       case C_SPIDELAY:
         if(t%ivl(0.10)==0){ int arms=1+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,150,0,0); b.spinAng+=Math.toRadians(12); }
         if(t%ivl(2.0)==0){ int n=dcnt(18); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; double bx=b.x+Math.cos(a)*60,by=b.y+Math.sin(a)*44; Bullet bb=mkB(bx,by,a,0,2,b.hue+30); bb.mode=1; bb.delay=(int)Math.round(0.5*60); bb.dsp=bs(160); } } break;
       case C_ZENITH:
         if(t%ivl(1.0)==0) ring(b,dcnt(22),150,t*0.05,0,0);
         if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,1,20); b.spinAng+=Math.toRadians(13); }
-        if(t%ivl(1.2)==0){ Laser L=laser(b.x<W/2?40:W-40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=(b.x<W/2?bs(180):-bs(180)); } break;
-      case C_DRINGROT:
-        if(t%ivl(1.4)==0){ int n=dcnt(16); ring(b,n,130,0,0,0); ring(b,n,160,Math.PI/n,2,30); }
-        if(t==1){ b.s2=2+diffIdx; for(int k=0;k<b.s2;k++){ Laser L=laser(b.x,b.y,k*Math.PI*2/b.s2,24,1000000,11,b.hue+20); L.anchor=true; L.spin=Math.toRadians((new double[]{35,55,75,100})[diffIdx])/60.0; } } break;
+        if(t%ivl(1.1)==0) sweepWall(b,170,15,0); break;
+      case C_DRINGROT:  // 二重リング＋回転弾翼（ビーム→弾の腕）
+        if(t%ivl(1.4)==0){ int n=dcnt(16); double rot=b.spinAng; ring(b,n,130,rot,0,0); ring(b,n,160,rot+Math.PI/n,2,30); }
+        if(t%ivl(0.06)==0){ int arms=3+diffIdx; for(int k=0;k<arms;k++) arm(b,b.spinAng+k*Math.PI*2/arms,150,1,20); b.spinAng+=Math.toRadians(5); } break;
       case C_FINSEQ:{
         int sw=Math.max(40,(int)Math.round((new double[]{1.4,1.0,0.8,0.6})[diffIdx]*60));
         int phase=(t/sw)%4;
         if(phase==0){ if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); b.spinAng+=Math.toRadians(13);} }
-        else if(phase==1){ if(t%ivl(1.2)==0) ring(b,dcnt(18),150,0,2,30); }
+        else if(phase==1){ if(t%ivl(1.2)==0) ring(b,dcnt(18),150,t*0.045,2,30); }
         else if(phase==2){ if(t%ivl(0.7)==0) nway(b,3,150,24,1,60); }
         else { if(t%ivl(1.0)==0){ int n=dcnt(16); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; Bullet bb=mkB(b.x,b.y,a,bs(150),0,b.hue); bb.mode=4; bb.grav=Math.toRadians(0.5);} } }
         break; }
@@ -802,9 +757,19 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); b.spinAng+=Math.toRadians(13); }
         if(layer>=2 && t%ivl(1.2)==0) ring(b,dcnt(16),150,0,2,30);
         if(layer>=3 && t%ivl(0.7)==0) nway(b,3,150,24,1,60);
-        if(layer>=4 && t%ivl(1.4)==0){ boolean left=(b.s1++%2==0); double y0=160+Math.random()*(H*0.5); laser(left?0:W,y0,left?0:Math.PI,teleFrames(),24,12,b.hue+10); }
+        if(layer>=4 && t%ivl(1.4)==0) sweepWall(b,150,12,10);
         if(layer>=5 && t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=130; } }
         break; }
+    }
+    // 棒立ち対策：純パターン（リング/螺旋）のボス＝ブルーム(1)・ヴォルテクス(2)のスペルにだけ
+    // 「自機狙い」か「ばらまき」を混ぜる。エコー等の特殊弾幕は素の挙動を活かす（被せない）。
+    if(b.spell && (b.idx==1||b.idx==2) && b.declTimer<=0 && t%ivl(1.6)==0){
+      if((b.atkIdx & 1)==0){                                          // 自機狙い：決め打ち5発（Lunaticは7発）
+        nway(b, isLunatic()?7:5, 130, 40, 1, 60);
+      } else {                                                        // ばらまき：全方位にそこそこの数
+        int m=Math.max(12, dcnt(18)); double off=Math.random()*Math.PI*2;
+        for(int i=0;i<m;i++) mkB(b.x,b.y, off + i*Math.PI*2/m + rr(-0.12,0.12), bs(115), i%3, b.hue+60);
+      }
     }
   }
   // 落下する弾壁（隙間が左右に動く）
@@ -819,6 +784,37 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     if(b.atkT%ivl(1.2)!=0) return;
     int pos=(b.s1*5)%Math.max(1,(n-win)); b.s1++;
     for(int i=0;i<n;i++){ if(i>=pos&&i<pos+win) continue; double bx=W*0.03+(W*0.94)*i/(n-1); mkB(bx,-10,Math.PI/2,bs(spd),0,b.hue); }
+  }
+  // ビーム代替：横へ流れる弾の壁（縦に並び、左右どちらかから／隙間つき）
+  void sweepWall(Boss b,double spdPxs,int rows,double hueOff){
+    boolean left=(b.s1++%2==0); double dir=left?0:Math.PI, ex=left?-12:W+12, sp=(double)H/rows;
+    int gap=2+(int)(Math.random()*Math.max(1,rows-5));
+    for(int i=0;i<rows;i++){ if(i>=gap&&i<gap+3) continue; mkB(ex, i*sp+sp/2, dir, bs(spdPxs), 0, b.hue+hueOff); }
+  }
+  // ビーム代替：上から落ちる弾の壁（横に並び／隙間つき）
+  void dropWall(Boss b,double spdPxs,int cols,double hueOff){
+    int gap=2+(int)(Math.random()*Math.max(1,cols-5));
+    for(int i=0;i<cols;i++){ if(i>=gap&&i<gap+3) continue; double bx=W*0.04+(W*0.92)*i/(cols-1); mkB(bx,-12,Math.PI/2,bs(spdPxs),0,b.hue+hueOff); }
+  }
+  // ビーム代替：左右から横向きの弾の壁（挟み込み）
+  void sideWalls(Boss b,double spdPxs,int rows,double hueOff){
+    double sp=(double)H/rows; int gap=2+(int)(Math.random()*Math.max(1,rows-5));
+    for(int i=0;i<rows;i++){ if(i>=gap&&i<gap+3) continue; double y=i*sp+sp/2;
+      mkB(-12,y,0,bs(spdPxs),0,b.hue+hueOff); mkB(W+12,y,Math.PI,bs(spdPxs),0,b.hue+hueOff); }
+  }
+  // 弾で同心リングの「形」を作り、一定時間後に外向きへ崩す（mode5）
+  void shapeFormCollapse(Boss b){
+    int t=b.atkT;
+    int hold=ivl(1.5), period=hold+ivl(1.0);
+    if(t%period==0){
+      double cx=b.x, cy=b.y; int[] cnt={26,18,12}; double[] rad={155,105,58};
+      for(int r=0;r<cnt.length;r++){ int n=Math.max(8, dcnt(cnt[r]));
+        for(int i=0;i<n;i++){ double a=i*Math.PI*2/n + r*0.18;
+          Bullet bb=mkB(cx+Math.cos(a)*rad[r], cy+Math.sin(a)*rad[r], a, 0, r==0?2:0, b.hue+r*16);
+          bb.mode=5; bb.delay=hold; bb.da=a; bb.dsp=bs(150); } }
+    }
+    // 崩す合間に自機狙いを少し（形成中の棒立ち防止）
+    if(t%period==hold+ivl(0.4) && t%ivl(0.4)==0) nway(b,3+diffIdx,140,28,1,40);
   }
 
   /* ====================================================================
@@ -845,7 +841,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     }
     if(wave>=3){
       if(t%ivl(0.9)==0) ring(b,dcnt(20),150,t*0.05,2,40);
-      if(t%ivl(1.2)==0){ Laser L=laser(40,-200,Math.PI/2,teleFrames(),100,14,b.hue); L.len=1700; L.vx=bs(180); }
+      if(t%ivl(1.1)==0) sweepWall(b,170,15,0);
     }
     if(b.luxTimer<=0){ // L2 へ
       b.luxPhase=2; b.invincible=false; b.dead=false;
@@ -970,9 +966,27 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     sr.events.add(new Ev(bossAt-130, ()->{ bossWarn=130; sound.bossDown(); }));
     sr.events.add(new Ev(bossAt, ()-> startDialogue(INTRO[idx], ()->{
       bulletCancelToStars(); enemies.clear(); lasers.clear(); delayed.clear();
-      boss=makeBoss(idx); bossWarn=0; }) ));
+      boss=makeBoss(idx); spawnDrones(idx); bossWarn=0; }) ));
     sr.finalTime = bossAt;
     return sr;
+  }
+  // Hard=2体 / Lunatic=4体：ボスと一緒に動き、ボス的な（少なめの）弾幕を撃つ随伴ドローン
+  void spawnDrones(int idx){
+    if(diffIdx<2) return;
+    int n = isLunatic()?4:2; double h = (STAGE_INFO[idx].bg+40)%360;
+    for(int i=0;i<n;i++){
+      EnemyType g = new EnemyType();
+      g.shape = pick(ENEMY_SHAPES); g.hue=h; g.size=20; g.move="hover"; g.tier=2;
+      g.hp = (int)Math.round(1300 + idx*300); g.score=300; g.moveSpeed=2; g.amp=0; g.freq=0.02;
+      g.detailSeed=rng.nextLong(); g.fireCd=(int)Math.round(90*diff().fireMul);   // ボスより控えめ
+      g.patterns = new Pattern[]{ makeUniquePattern(null, h, 0.8, 0.45) };        // ボス的な設計弾幕
+      Enemy e = new Enemy(); e.g=g; e.drone=true;
+      double ang = Math.PI*2*i/n;
+      e.ox = Math.cos(ang)*155; e.oy = Math.sin(ang)*70 - 10;
+      e.x = W/2 + e.ox; e.y = -50; e.sx=e.x; e.sy=e.y;
+      e.hp=g.hp; e.maxhp=g.hp; e.fireBudget=999999; e.fireT=40 + i*16;
+      enemies.add(e);
+    }
   }
   // 中ボス：その場で静止して撃ち続ける大型機（HPバーつき・倒すと先へ）
   void spawnMidboss(int idx){
@@ -993,9 +1007,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   // 撃破時の死亡弾（自機狙い小リング＋3way）
   void enemyDeathBurst(Enemy e){
     if(enemyBullets.size()>1700) return;
-    double aim=aimAt(e.x,e.y);
-    int n = 5 + Math.min(3, stageIndex);
-    for(int i=0;i<n;i++) mkB(e.x,e.y, i*Math.PI*2/n + aim, bs(140+stageIndex*12), 0, e.g.hue);
+    int n = 6 + Math.min(4, stageIndex);
+    double off = rng.nextDouble()*Math.PI*2;                     // 全方位（自機狙いではない）
+    for(int i=0;i<n;i++) mkB(e.x,e.y, off + i*Math.PI*2/n, bs(135+stageIndex*10), 0, e.g.hue);
   }
   void setDelayed(int delay, Runnable fn){ delayed.add(new Ev(stageTimer+delay, fn)); }
 
@@ -1043,7 +1057,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     stageRunner=buildStageTimeline(idx);
     stageDiff = 1 + idx*diff().stageScale;
     curStageHpMul = 1 + idx*0.10;
-    state="briefing"; transTimer=160;
+    state="play"; transTimer=0; pInvuln=Math.max(pInvuln,90);   // 演出画面なし（層名はサイドバー表記）
     snaps.clear(); rwUsesLeft = RW_USES[diffIdx]; rwCD=0; rewindFx=0;   // 巻き戻し回数は層ごとに回復
     midbossActive=false; midbossRef=null; midbossPending=false;
     sound.startBGM(idx);
@@ -1066,14 +1080,34 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     if(pInvuln>0||pDead) return;
     pDead=true; pDeathTimer=0; explosion(px,py,200,true); sound.death();
     shake=18; flash=0.6; clearEnemyBullets(true);
-    power=Math.max(0, power - (diffIdx==0?20:35));
+    power=Math.max(30, power - (diffIdx==0?8:14));   // 減少を緩和＋下限Lv.3（ボス戦で枯れない）
     if(boss!=null) boss.captured=false;   // 被弾でスペルカード捕獲失敗
   }
   void respawnOrGameOver(){
-    if(lives>0){ lives--; resetPlayer(); bombs=Math.max(bombs,2); }
-    else { state="gameover"; transTimer=0; saveHiIfNeeded(); sound.stopBGM();
-      if(endlessMode){ String k=catKey(); int v=survivalFrames;   // 生存時間を自己ベストに（大きいほど良い）
-        if(!bestScore.containsKey(k)||v>bestScore.get(k)){ bestScore.put(k,(Integer)v); newRecScore=true; saveRecords(); sound.spellGet(); } } }
+    if(lives>0){ lives--; resetPlayer(); bombs=Math.max(bombs,2); return; }
+    if(endlessMode){   // 無限：コンティニュー無し→記録保存してゲームオーバー
+      state="gameover"; transTimer=0; saveHiIfNeeded(); sound.stopBGM();
+      String k=catKey(); int v=survivalFrames;
+      if(!bestScore.containsKey(k)||v>bestScore.get(k)){ bestScore.put(k,(Integer)v); newRecScore=true; saveRecords(); sound.spellGet(); }
+      return;
+    }
+    state="continue"; sound.stopBGM();   // コンティニュー選択へ
+  }
+  void doContinue(boolean yes){
+    if(yes){
+      continued=true; continueCount++;
+      lives=diff().lives; bombs=diff().bombs;
+      enemyBullets.clear(); lasers.clear(); resetPlayer(); pInvuln=200;
+      state="play"; sound.init(); sound.startBGM(stageIndex);
+    } else {
+      state="gameover"; transTimer=0; saveHiIfNeeded();
+    }
+  }
+  void updateContinue(){
+    frame++;
+    if(actJust("confirm")||actJust("shot")) doContinue(true);     // Z/Enter=コンティニュー
+    else if(actJust("bomb")||actJust("quit")||actJust("pause")) doContinue(false);  // X/Q/Esc=やめる
+    clearJust();
   }
   void useBomb(){
     if(bombs<=0||pDead||pBombTimer>0) return;
@@ -1154,9 +1188,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         if(lv>=4){ mk(px-26,sy+10,-3.2,-15,3.5,d,false); mk(px+26,sy+10,3.2,-15,3.5,d,false); }
         if(lv>=5){ mk(px-34,sy+14,-4.6,-14,3.5,d,false); mk(px+34,sy+14,4.6,-14,3.5,d,false); }
         break; }
-      case 1: { // FORWARD 集束
-        int d=(int)Math.round(11*m);
-        mk(px,sy-6,0,-19,7,(int)Math.round(d*1.2),false);
+      case 1: { // FORWARD 集束（威力控えめに調整）
+        int d=(int)Math.round(7*m);
+        mk(px,sy-6,0,-19,7,(int)Math.round(d*1.1),false);
         if(lv>=2){ mk(px-6,sy,0,-18,5,d,false); mk(px+6,sy,0,-18,5,d,false); }
         if(lv>=3){ mk(px-12,sy+4,0,-18,5,d,false); mk(px+12,sy+4,0,-18,5,d,false); }
         if(lv>=4){ mk(px-4,sy-2,-0.5,-18.5,5,d,false); mk(px+4,sy-2,0.5,-18.5,5,d,false); }
@@ -1180,14 +1214,18 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         for(Enemy e:enemies){ double dd=(e.x-b.x)*(e.x-b.x)+(e.y-b.y)*(e.y-b.y); if(dd<bestd){bestd=dd;tx=e.x;ty=e.y;found=true;} }
         if(boss!=null && !boss.entering && !boss.dead){ double dd=(boss.x-b.x)*(boss.x-b.x)+(boss.y-b.y)*(boss.y-b.y); if(dd<bestd){bestd=dd;tx=boss.x;ty=boss.y;found=true;} }
         if(found){ double desired=Math.atan2(ty-b.y,tx-b.x), cur=Math.atan2(b.vy,b.vx);
-          double dif=Math.atan2(Math.sin(desired-cur),Math.cos(desired-cur)), turn=0.09;
-          cur+=Math.max(-turn,Math.min(turn,dif)); double sp=Math.hypot(b.vx,b.vy); if(sp<1)sp=15;
-          b.vx=Math.cos(cur)*sp; b.vy=Math.sin(cur)*sp; }
+          double dif=Math.atan2(Math.sin(desired-cur),Math.cos(desired-cur));
+          // 前方の標的だけ追尾（行き過ぎ＝標的が後方なら直進して画面外へ＝クルクル周回を防止）
+          if(Math.abs(dif) < Math.toRadians(110)){
+            double turn=0.16; cur+=Math.max(-turn,Math.min(turn,dif));
+            double sp=Math.hypot(b.vx,b.vy); if(sp<1)sp=15;
+            b.vx=Math.cos(cur)*sp; b.vy=Math.sin(cur)*sp; } }
       }
       b.x+=b.vx; b.y+=b.vy;
       if(b.y<-20||b.y>H+30||b.x<-30||b.x>W+30){ playerBullets.remove(i); continue; }
       boolean hit=false;
-      for(Enemy e:enemies){ double rr=e.g.size*0.7+b.r;
+      for(Enemy e:enemies){ if(e.drone) continue;   // ドローンは無敵（自弾は貫通）
+        double rr=e.g.size*0.7+b.r;
         if((e.x-b.x)*(e.x-b.x)+(e.y-b.y)*(e.y-b.y)<rr*rr){ e.hp-=b.dmg; e.hitFlash=2; hit=true; sound.enemyHit();
           Particle p=new Particle(); p.x=b.x;p.y=b.y;p.life=1;p.decay=0.1;p.hue=e.g.hue;p.r=3; particles.add(p); break; } }
       if(!hit && boss!=null && !boss.entering && !boss.dead){ double rr=boss.size*0.85+b.r;
@@ -1240,8 +1278,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
       Enemy e=enemies.get(i); updateEnemy(e);
       if(e.hp<=0 && !e.dead){ e.dead=true; score+=e.g.score; explosion(e.x,e.y,e.g.hue,e.g.tier>1);
         sound.explode(); dropItems(e.x,e.y,e.g.tier);
-        if(e==midbossRef){ midbossActive=false; midbossRef=null; deathBurstOn=true; explosion(e.x,e.y,e.g.hue,true); shake=14; dropSpecial(e.x,e.y); }
-        else if(deathBurstOn && e.g.tier<=2 && e.y<H*0.85) enemyDeathBurst(e); }   // 撃破時に弾を撒く雑魚
+        if(e==midbossRef){ midbossActive=false; midbossRef=null; deathBurstOn=true; explosion(e.x,e.y,e.g.hue,true); shake=14; dropSpecial(e.x,e.y);
+          if(stageRunner!=null && stageRunner.idx<stageRunner.events.size()) stageTimer=stageRunner.events.get(stageRunner.idx).t-1; }  // 撃破後すぐ次のウェーブへ
+        else if(deathBurstOn && e.g.tier<=2 && e.y<H*0.85 && rng.nextDouble()<0.33) enemyDeathBurst(e); }   // 一部の雑魚だけ撃破時に弾
       if(e.dead) enemies.remove(i);
     }
     if(midbossActive && (midbossRef==null || midbossRef.dead)){ midbossActive=false; midbossRef=null; }
@@ -1314,6 +1353,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         case 1: // 停止 → 解除後に自機方向へ
           if(b.delay>0){ b.delay--; if(b.delay==0){ b.angle=Math.atan2(py-b.y,px-b.x); b.speed=b.dsp; } break; }
           b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; break;
+        case 5: // 形を保持 → 解除後に記憶した方向(da)へ（弾で形作って崩す）
+          if(b.delay>0){ b.delay--; if(b.delay==0){ b.angle=b.da; b.speed=b.dsp; } break; }
+          b.x+=Math.cos(b.angle)*b.speed; b.y+=Math.sin(b.angle)*b.speed; break;
         case 2: // 誘導
           if(b.homTime>0){ b.homTime--; double des=Math.atan2(py-b.y,px-b.x);
             double d=Math.atan2(Math.sin(des-b.angle),Math.cos(des-b.angle));
@@ -1380,9 +1422,13 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
      状態ディスパッチ
      ==================================================================== */
   void update(){
+    // 音量調節（どの画面でも -/[ で下げ、=/] で上げ）
+    if(just[KeyEvent.VK_EQUALS]||just[KeyEvent.VK_CLOSE_BRACKET]){ just[KeyEvent.VK_EQUALS]=just[KeyEvent.VK_CLOSE_BRACKET]=false; sound.init(); floatText(CX,60,"音量 "+sound.addVolume(0.1)+"%",60); }
+    if(just[KeyEvent.VK_MINUS]||just[KeyEvent.VK_OPEN_BRACKET]){ just[KeyEvent.VK_MINUS]=just[KeyEvent.VK_OPEN_BRACKET]=false; floatText(CX,60,"音量 "+sound.addVolume(-0.1)+"%",60); }
     switch(state){
       case "menu": updateMenu(); break;
       case "records": updateRecords(); break;
+      case "continue": updateContinue(); break;
       case "practice": updatePractice(); break;
       case "charselect": updateCharSelect(); break;
       case "dialogue": updateDialogue(); break;
@@ -1491,7 +1537,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     usedPatternSigs.clear(); usedEnemySigs.clear(); usedDesign.clear(); enemyDesignRot=0;
     rng = new Random();
     score=0; lives=diff().lives; bombs=diff().bombs; power=0; stageIndex=0; grazeCount=0;
-    echoUsed=false; newRecTime=false; newRecScore=false; deathBurstOn=false;   // 残響使用フラグは1周通しでリセット
+    echoUsed=false; newRecTime=false; newRecScore=false; deathBurstOn=false; continued=false; continueCount=0;   // フラグは1周通しでリセット
     runStartNano=System.nanoTime(); clearTimerRunning=true; runTimeSec=0;
     endlessMode=timeLimitMode=silentMode=practiceMode=false;
     if(gameMode.equals("回廊無限")) endlessMode=true;
@@ -1507,7 +1553,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     items.clear(); particles.clear(); lasers.clear(); boss=null; delayed.clear();
     snaps.clear(); rwUsesLeft=RW_USES[diffIdx]; rwCD=0; midbossActive=false;
     stageTimer=0; bossWarn=0; stageRunner=null;
-    state="briefing"; transTimer=120; sound.startBGM(0);
+    state="play"; transTimer=0; pInvuln=Math.max(pInvuln,90); sound.startBGM(0);
   }
   void toMenu(){
     sound.stopBGM(); state="menu"; menuSel=0;
@@ -1518,36 +1564,38 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   /* ====================================================================
      描画
      ==================================================================== */
-  // 星
-  static class Star { double x,y,z,s; }
+  // 星（Star は util/ パッケージ）
   Star[] stars = new Star[140];
   Star[] tstars = new Star[80];
   void initStars(){
     for(int i=0;i<stars.length;i++){ Star s=new Star(); s.x=Math.random()*VW; s.y=Math.random()*H; s.z=Math.random()*2+0.4; s.s=Math.random()*1.6+0.3; stars[i]=s; }
     for(int i=0;i<tstars.length;i++){ Star s=new Star(); s.x=Math.random()*VW; s.y=Math.random()*H; s.z=Math.random()*1.5+0.3; s.s=Math.random()*2+0.5; tstars[i]=s; }
   }
-  static Color hsb(double h,double s,double b){ float hh=(float)((((h%360)+360)%360)/360.0); return Color.getHSBColor(hh,(float)clamp01(s),(float)clamp01(b)); }
-  static Color hsba(double h,double s,double b,int a){ Color c=hsb(h,s,b); return new Color(c.getRed(),c.getGreen(),c.getBlue(),Math.max(0,Math.min(255,a))); }
-  static double clamp01(double v){ return v<0?0:v>1?1:v; }
+  // 色ヘルパ hsb/hsba/clamp01 は render/Colors（static import）
 
   double bgHueFor(){
     if(state.equals("menu")||state.equals("help")||state.equals("charselect")) return 220;
     if(state.equals("victory")) return STAGE_INFO[5].bg;
     return STAGE_INFO[Math.max(0,Math.min(5,stageIndex))].bg;
   }
-  // 固定解像度のオフスクリーンに描画 →1枚を拡大転送（Retina/大ウィンドウでも描画コスト一定）
+  // オフスクリーンに高解像度(スーパーサンプル)で描画 →1枚を転送（画質向上＋コスト一定）
+  static final double SS = 1.6;                 // スーパーサンプル倍率（画質）
+  static final int BW=(int)Math.round(VW*SS), BH=(int)Math.round(H*SS);
   BufferedImage frameBuf; Graphics2D frameG;
   protected void paintComponent(Graphics g){
     super.paintComponent(g);
     if(frameBuf==null){
-      frameBuf=new BufferedImage(VW,H,BufferedImage.TYPE_INT_RGB);
+      frameBuf=new BufferedImage(BW,BH,BufferedImage.TYPE_INT_RGB);
       frameG=frameBuf.createGraphics();
       frameG.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
       frameG.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
       frameG.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+      frameG.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+      frameG.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+      frameG.scale(SS, SS);                     // 以降は VW×H 座標で描ける
     }
     frameG.setClip(null);
-    renderGame(frameG);   // VW×H の固定解像度へ描画
+    renderGame(frameG);   // VW×H 座標 → 内部は BW×BH に高精細描画
     // ウィンドウへ1枚転送（レターボックス）
     Graphics2D g2=(Graphics2D)g;
     int ww=getWidth(), wh=getHeight();
@@ -1567,7 +1615,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   void renderGame(Graphics2D g2){
     g2.setColor(Color.BLACK); g2.fillRect(0,0,VW,H);   // ブレ時の縁対策
     AffineTransform base=g2.getTransform();
-    if(shake>0) g2.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake);
+    // 画面揺れ演出は廃止（shake は無効化）
     switch(state){
       case "menu": drawMenu(g2); break;
       case "records": drawRecords(g2); break;
@@ -1576,7 +1624,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
       case "dialogue": drawDialogue(g2); break;
       case "help": drawHelp(g2); break;
       case "briefing": drawBackground(g2,stageIndex); drawPlayfieldFrame(g2); drawSidebar(g2); drawBriefing(g2); break;
-      case "play": case "paused": case "stageclear": case "gameover": {
+      case "play": case "paused": case "stageclear": case "gameover": case "continue": {
         drawBackground(g2,stageIndex);
         // プレイフィールドにクリップして world を描画
         Shape oldClip=g2.getClip();
@@ -1590,6 +1638,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
         else if(state.equals("paused")) drawPaused(g2);
         else if(state.equals("stageclear")) drawStageClear(g2);
         else if(state.equals("gameover")) drawGameOver(g2);
+        else if(state.equals("continue")) drawContinue(g2);
         break;
       }
       case "victory": drawBackground(g2,5); drawVictory(g2); break;
@@ -1605,62 +1654,15 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
 
   // 背景（グラデ＋星雲）はステージ毎に1回だけ生成してキャッシュ→毎フレームは転送のみ
   final HashMap<Integer,BufferedImage> bgCache = new HashMap<>();
-  BufferedImage buildBg(int idx){
-    double hue = (idx>=0&&idx<STAGE_INFO.length)?STAGE_INFO[idx].bg:220;
-    BufferedImage img=new BufferedImage(VW,H,BufferedImage.TYPE_INT_RGB);
-    Graphics2D g=img.createGraphics();
-    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-    g.setPaint(new GradientPaint(0,0,hsb(hue,0.6,0.08), 0,H,hsb((hue+60)%360,0.6,0.10)));
-    g.fillRect(0,0,VW,H);
-    g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,0.10f));
-    for(int i=0;i<4;i++){
-      double cx=(0.12+i*0.26)*VW, cy=(0.12+i*0.27)*H;
-      RadialGradientPaint rp=new RadialGradientPaint(new Point2D.Double(cx,cy),230,
-        new float[]{0f,1f}, new Color[]{hsb((hue+i*40)%360,0.7,0.5), new Color(0,0,0,0)});
-      g.setPaint(rp); g.fillRect((int)(cx-230),(int)(cy-230),460,460);
-    }
-    // 層ごとのモチーフ（焼き込み）
-    java.util.Random rb=new java.util.Random(idx*9176+13);
-    g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,1f));
-    switch(idx){
-      case 0:  // ゲート：縦の門柱ライン＋ノイズ
-        g.setColor(hsba(hue,0.2,0.25,30)); g.setStroke(new BasicStroke(2f));
-        for(int x=60;x<VW;x+=110) g.drawLine(x,0,x,H);
-        g.setColor(new Color(255,255,255,12)); for(int k=0;k<400;k++) g.fillRect(rb.nextInt(VW),rb.nextInt(H),2,2);
-        break;
-      case 1:  // ブルーム：浮遊する花びら
-        for(int k=0;k<60;k++){ double X=rb.nextInt(VW),Y=rb.nextInt(H),r=6+rb.nextInt(10);
-          g.setColor(hsba((hue+rb.nextInt(40))%360,0.5,0.8,22));
-          g.fill(new Ellipse2D.Double(X,Y,r,r*0.5)); } break;
-      case 2:  // ヴォルテクス：渦の同心円
-        g.setColor(hsba(hue,0.5,0.6,26)); g.setStroke(new BasicStroke(2f));
-        for(int r=40;r<700;r+=46) g.draw(new Ellipse2D.Double(VW*0.5-r,H*0.4-r,r*2,r*2)); break;
-      case 3:  // グリッド：青白の格子
-        g.setColor(hsba(hue,0.45,0.65,30)); g.setStroke(new BasicStroke(1.2f));
-        for(int x=0;x<VW;x+=44) g.drawLine(x,0,x,H);
-        for(int y=0;y<H;y+=44) g.drawLine(0,y,VW,y); break;
-      case 4:  // エコー：二重の同心波紋
-        g.setStroke(new BasicStroke(1.6f));
-        for(int r=30;r<760;r+=64){ g.setColor(hsba(hue,0.5,0.6,24)); g.draw(new Ellipse2D.Double(VW*0.5-r,H*0.5-r,r*2,r*2));
-          g.setColor(hsba(hue,0.5,0.6,12)); g.draw(new Ellipse2D.Double(VW*0.5-r+10,H*0.5-r+10,r*2,r*2)); } break;
-      default: // ルクス：中央の金色放射
-        for(int k=0;k<40;k++){ double a=k*Math.PI/20;
-          g.setColor(hsba(45,0.7,0.8,14)); g.setStroke(new BasicStroke(2f));
-          g.draw(new Line2D.Double(VW*0.5,H*0.32,VW*0.5+Math.cos(a)*900,H*0.32+Math.sin(a)*900)); } break;
-    }
-    g.dispose();
-    return img;
-  }
   void drawBackground(Graphics2D g2,int idx){
-    BufferedImage bg=bgCache.get(idx);
-    if(bg==null){ bg=buildBg(idx); bgCache.put(idx,bg); }
-    g2.drawImage(bg,0,0,null);
-    double hue=(idx>=0&&idx<STAGE_INFO.length)?STAGE_INFO[idx].bg:220;
+    g2.setColor(Color.BLACK); g2.fillRect(0,0,VW,H);     // 背景は真っ黒
+    // 流れる星（控えめ・速度の目印程度）
     for(Star st:stars){
       st.y += st.z*(1.4+idx*0.15);
       if(st.y>H){ st.y=-2; st.x=Math.random()*VW; }
-      g2.setColor(hsba((hue+200)%360,0.4,0.6+st.z*0.15,(int)(120+st.z*60)));
-      g2.fillRect((int)st.x,(int)st.y,(int)st.s,(int)(st.s+st.z*1.5));
+      int a=(int)(40+st.z*22);
+      g2.setColor(new Color(120,130,150,a));
+      g2.fillRect((int)st.x,(int)st.y,(int)st.s,(int)st.s);
     }
   }
   // プレイフィールドの枠（サイドバーとの境界）
@@ -1992,8 +1994,9 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
 
   /* ---------------- HUD（右サイドバー） ---------------- */
   // ---- 灯火回廊 フォント体系（見出しは明朝で荘厳に・数値は等幅）----
-  static String JPM = pickFont(new String[]{"Hiragino Mincho ProN","YuMincho","Yu Mincho","Noto Serif CJK JP","Serif"});
-  static String JPG = pickFont(new String[]{"Hiragino Kaku Gothic ProN","YuGothic","Yu Gothic","Noto Sans CJK JP","SansSerif"});
+  // mac / Windows / Linux の日本語フォントを順に探す（無ければ論理フォント Serif/SansSerif）
+  static String JPM = pickFont(new String[]{"Hiragino Mincho ProN","YuMincho","Yu Mincho","Yu Mincho Demibold","MS Mincho","ＭＳ 明朝","Noto Serif CJK JP","Serif"});
+  static String JPG = pickFont(new String[]{"Hiragino Kaku Gothic ProN","YuGothic","Yu Gothic UI","Yu Gothic","Meiryo","MS Gothic","ＭＳ ゴシック","Noto Sans CJK JP","SansSerif"});
   static String pickFont(String[] cands){
     try{ java.util.Set<String> have=new java.util.HashSet<>(java.util.Arrays.asList(
       java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames()));
@@ -2112,7 +2115,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     }
     g2.setColor(new Color(95,127,174)); g2.setFont(new Font("SansSerif",Font.PLAIN,13));
     centerStr(g2,"移動: 方向キー / WASD    ショット: Z / Space    ボム: X",CX,H-110);
-    centerStr(g2,"低速: Shift    ポーズ: P    ミュート: M    残響リワインド: R / C",CX,H-88);
+    centerStr(g2,"低速: Shift    ポーズ: P    ミュート: M    残響: R/C    音量: - / =",CX,H-88);
     g2.setColor(new Color(58,86,127)); g2.setFont(new Font("SansSerif",Font.PLAIN,12));
     centerStr(g2,"HI-SCORE  "+pad(hiscore,8),CX,H-52);
     centerStr(g2,"全6層・各層に中ボスとボス／通常↔スペル交互の手作り弾幕",CX,H-30);
@@ -2226,6 +2229,8 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.BOLD,48)); centerStr(g2,"PAUSE",CX,H/2-20);
     g2.setColor(new Color(159,200,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,18));
     centerStr(g2,"P / Esc で再開　　Q でタイトルへ",CX,H/2+30);
+    g2.setColor(new Color(150,170,200)); g2.setFont(new Font("SansSerif",Font.PLAIN,15));
+    centerStr(g2,"音量: - / =  （現在 "+sound.volPct()+"%）　　M: ミュート",CX,H/2+64);
   }
   void drawStageClear(Graphics2D g2){
     g2.setColor(new Color(0,0,10,140)); g2.fillRect(0,0,VW,H);
@@ -2233,6 +2238,15 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     centerStr(g2,"STAGE "+(stageIndex+1)+" CLEAR!",CX,H/2-20);
     g2.setColor(new Color(159,255,207)); g2.setFont(new Font("SansSerif",Font.PLAIN,18));
     centerStr(g2,"SCORE  "+pad(score,8),CX,H/2+24);
+  }
+  void drawContinue(Graphics2D g2){
+    g2.setColor(new Color(10,0,4,180)); g2.fillRect(0,0,VW,H);
+    g2.setColor(new Color(255,200,120)); g2.setFont(mincho(48)); centerStr(g2,"CONTINUE?",CX,H/2-40);
+    g2.setColor(Color.WHITE); g2.setFont(gothic(20,true));
+    centerStr(g2,"Z / Enter ： 続ける    X / Esc ： やめる",CX,H/2+14);
+    g2.setColor(new Color(255,180,150)); g2.setFont(gothic(14,false));
+    centerStr(g2,"※コンティニューすると「正規踏破（ノーコンティニュー）」ではなくなります",CX,H/2+48);
+    if(continueCount>0){ g2.setColor(new Color(160,170,200)); centerStr(g2,"これまでのコンティニュー: "+continueCount+" 回",CX,H/2+74); }
   }
   void drawGameOver(Graphics2D g2){
     g2.setColor(new Color(20,0,5,205)); g2.fillRect(0,0,VW,H);
@@ -2246,7 +2260,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   void drawVictory(Graphics2D g2){
     g2.setColor(new Color(255,236,210)); g2.setFont(mincho(52)); centerStr(g2,"灯 を 継 ぐ 者",CX,150);
     g2.setColor(new Color(255,210,127)); g2.setFont(new Font("SansSerif",Font.BOLD,22)); centerStr(g2,"全6層を突破 — 灯を継ぐ者よ",CX,200);
-    g2.setColor(new Color(207,227,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,16)); centerStr(g2,"DIFFICULTY  "+diff().name+(echoUsed?"   （残響使用）":"   ★ノーコンテ"),CX,238);
+    g2.setColor(new Color(207,227,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,16)); centerStr(g2,"DIFFICULTY  "+diff().name+(clean()?"   ★正規踏破":"   （"+(echoUsed?"残響":"")+(echoUsed&&continued?"・":"")+(continued?"コンティニュー":"")+"使用）"),CX,238);
     // タイム & スコア
     g2.setColor(Color.WHITE); g2.setFont(new Font("Monospaced",Font.BOLD,30)); centerStr(g2,"TIME  "+fmtTime(runTimeSec),CX,300);
     g2.setFont(new Font("Monospaced",Font.BOLD,30)); centerStr(g2,"SCORE "+pad(score,8),CX,340);
@@ -2263,7 +2277,7 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
     centerStr(g2,"BEST TIME  "+(bestTime.containsKey(k)?fmtTime(bestTime.get(k)):"--"),CX,484);
     centerStr(g2,"BEST SCORE "+(bestScore.containsKey(k)?pad(bestScore.get(k),8):"--------"),CX,508);
     g2.setColor(new Color(255,200,140)); g2.setFont(new Font("SansSerif",Font.PLAIN,13));
-    centerStr(g2, echoUsed? "残響リワインドを使用したため「正規踏破」ではありません" : "残響不使用 — 正規踏破（ノーコンテ）", CX, 544);
+    centerStr(g2, clean()? "残響・コンティニュー不使用 — 正規踏破（ノーコンティニュー）" : "残響/コンティニュー使用のため「正規踏破」ではありません", CX, 544);
     g2.setColor(new Color(159,200,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,16)); centerStr(g2,"Z / Enter でタイトルへ",CX,610);
   }
 
@@ -2315,110 +2329,6 @@ class StellarCascade extends JPanel implements ActionListener, KeyListener {
   public void keyReleased(KeyEvent e){ int c=e.getKeyCode(); if(c<down.length) down[c]=false; }
   public void keyTyped(KeyEvent e){}
 
-  /* ====================================================================
-     オーディオ（自前ミキサ + 簡易シーケンサ）
-     ==================================================================== */
-  static class Sound {
-    static final int RATE=44100;
-    SourceDataLine line; volatile boolean ok=false, muted=false;
-    final List<Voice> voices = Collections.synchronizedList(new ArrayList<>());
-    Thread th; int shotCd=0;
-    static final int[][] SCALES = {
-      {0,2,3,5,7,8,10},{0,2,4,7,9},{0,3,5,6,7,10},{0,1,4,5,7,8,11},{0,2,3,7,8},{0,2,4,5,7,9,11}
-    };
-    int[] scale = SCALES[0]; double bassRoot=82; boolean bgmOn=false; int stepFrames=8; int bgmStep=0;
-    java.util.Random rnd=new java.util.Random();
-
-    void init(){
-      if(ok) return;
-      try{
-        AudioFormat fmt=new AudioFormat(RATE,16,1,true,false);
-        line=AudioSystem.getSourceDataLine(fmt); line.open(fmt, 4096); line.start();
-        ok=true;
-        th=new Thread(this::mix); th.setDaemon(true); th.start();
-      }catch(Throwable e){ ok=false; }
-    }
-    void mix(){
-      final int N=512; byte[] buf=new byte[N*2];
-      while(ok){
-        for(int i=0;i<N;i++){
-          double s=0;
-          synchronized(voices){
-            for(int v=voices.size()-1; v>=0; v--){ Voice vo=voices.get(v); s+=vo.next(); if(vo.done) voices.remove(v); }
-          }
-          if(muted) s=0;
-          s*=0.5; if(s>1)s=1; if(s<-1)s=-1;
-          short val=(short)(s*32767);
-          buf[i*2]=(byte)(val&0xff); buf[i*2+1]=(byte)((val>>8)&0xff);
-        }
-        try{ line.write(buf,0,buf.length); }catch(Throwable e){ break; }
-      }
-    }
-    void add(Voice v){ if(ok && !muted){ if(voices.size()<48) voices.add(v); } }
-    void tone(double freq,double dur,int type,double vol,double slide){ add(new Voice(freq,dur,type,vol,slide,false)); }
-    void noise(double dur,double vol){ add(new Voice(0,dur,0,vol,0,true)); }
-    void tick(){ if(shotCd>0) shotCd--; if(grazeCd>0) grazeCd--; }
-    // SFX
-    void shot(){ if(shotCd>0) return; shotCd=4; tone(880,0.05,0,0.05,0.6); }
-    void enemyHit(){ tone(220,0.04,0,0.05,0.8); }
-    void explode(){ noise(0.22,0.28); tone(120,0.3,1,0.16,0.4); }
-    void bossHit(){ noise(0.05,0.05); }
-    void bomb(){ noise(0.55,0.32); tone(80,0.6,1,0.22,0.5); }
-    void death(){ noise(0.45,0.38); tone(300,0.55,1,0.28,0.3); }
-    void menu(){ tone(660,0.06,0,0.12,1.2); }
-    void select(){ tone(990,0.1,0,0.15,1.3); }
-    void bossDown(){ tone(330,1.0,1,0.28,0.4); noise(0.9,0.28); }
-    void power(){ tone(1200,0.08,2,0.16,1.4); }
-    void extend(){ tone(523,0.12,2,0.18,1.0); tone(784,0.18,2,0.18,1.0); }
-    int grazeCd=0;
-    void graze(){ if(grazeCd>0) return; grazeCd=3; tone(2400,0.03,2,0.04,1.1); }
-    void spellDeclare(){ tone(220,0.6,1,0.16,2.0); tone(330,0.6,2,0.12,2.0); noise(0.2,0.12); }
-    void spellGet(){ tone(523,0.5,2,0.18,1.0); tone(659,0.5,2,0.16,1.0); tone(784,0.5,2,0.16,1.0); tone(1046,0.6,2,0.18,1.0); }
-    void rewind(){ tone(1400,0.18,2,0.18,0.5); tone(900,0.22,2,0.12,0.6); }   // ピンッ
-    boolean toggleMute(){ muted=!muted; return muted; }
-    void setSilent(boolean s){ muted=s; }
-    // BGM
-    void startBGM(int idx){ scale=SCALES[idx%SCALES.length]; bassRoot=82*Math.pow(2,(idx%3)/12.0); bgmOn=true; bgmStep=0; stepFrames=Math.max(5,9-idx/2); }
-    void stopBGM(){ bgmOn=false; }
-    void bgmTick(int frame,int idx){
-      if(!bgmOn||!ok||muted) return;
-      if(frame % stepFrames != 0) return;
-      int s=bgmStep%16;
-      if(s%4==0) tone(bassRoot,0.18,3,0.16,0.9);
-      int deg=scale[(bgmStep*3)%scale.length];
-      int oct=(bgmStep%8<4)?2:3;
-      double f=bassRoot*Math.pow(2,oct)*Math.pow(2,deg/12.0);
-      if(s%2==0) tone(f,0.12,0,0.045,1.0);
-      if(s%2==1) noise(0.025,0.035);
-      bgmStep++;
-    }
-    class Voice {
-      double baseFreq, vol, slide, phase; int total, pos, type; boolean noise2, done;
-      Voice(double freq,double dur,int type,double vol,double slide,boolean noise){
-        this.baseFreq=freq; this.vol=vol; this.slide=slide; this.type=type; this.noise2=noise;
-        total=(int)(dur*RATE); if(total<1) total=1;
-      }
-      double next(){
-        if(done) return 0;
-        double s;
-        if(noise2){ s=rnd.nextDouble()*2-1; }
-        else {
-          double f = (slide>0)? baseFreq*Math.pow(slide,(double)pos/total) : baseFreq;
-          phase += f/RATE; if(phase>=1) phase-=1;
-          switch(type){
-            case 0: s=phase<0.5?1:-1; break;            // square
-            case 1: s=2*phase-1; break;                  // saw
-            case 2: s=Math.sin(phase*Math.PI*2); break;  // sine
-            default: s=phase<0.5? (4*phase-1):(3-4*phase); break; // triangle
-          }
-        }
-        double env=vol*Math.max(0,1.0-(double)pos/total);
-        int attack=64; if(pos<attack) env*=(double)pos/attack;
-        pos++; if(pos>=total) done=true;
-        return s*env;
-      }
-    }
-  }
 
   /* ====================================================================
      main
