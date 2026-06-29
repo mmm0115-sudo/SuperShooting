@@ -210,7 +210,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     DELAYB=40, HOMING=41, SPLITB=42, CHAIN=43, WAVE=44, SPLITHOM=45, CHASE=46, GRAVITY=47, STAGGER=48, ECHOV=49,
     C_RINGAIM=60, C_CONCERTO=61, C_SPIHOM=62, C_PHANTOM=63, C_RINGLZ=64, C_REVEL=65,
     C_SPIDELAY=66, C_ZENITH=67, C_DRINGROT=68, C_FINSEQ=69, C_TOTAL=70, C_LANTERN=71,
-    LUX_L1=80;
+    LUX_L1=80, LUX_L2=81;
   static Atk N(String n,int s,double sec){ return new Atk(false,n,s,sec); }
   static Atk S(String n,int s,double sec){ return new Atk(true ,n,s,sec); }
   static final BossInfo[] BOSSES = {
@@ -579,8 +579,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(b.declTimer>0){ b.declTimer--; if(b.declTimer==0 && !b.spell){} return; }  // 宣言中は撃たない
     b.atkT++;
     runBossScript(b);
-    // 基本はHPを削り切って進行。ただし長く詰まらないよう保険のタイムアウト（45秒）で必ず次へ。
-    if(b.atkT > 45*60){ b.captured=false; bossAdvance(b,false); }
+    // 基本はHPを削り切って進行。真ラストL2だけは設定どおり50秒、それ以外は45秒を上限にする。
+    int timeout = b.luxPhase==2 ? b.timeLimit : 45*60;
+    if(b.atkT > timeout){ b.captured=false; bossAdvance(b,false); }
   }
   void bossTakeDamage(Boss b,int dmg){
     if(practiceMode) return;     // 弾幕鑑賞ではボスは倒れない（時間で循環）
@@ -714,7 +715,10 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         break;
       /* ---- 第6層 ルクス：複合 ---- */
       case C_RINGAIM:
-        if(t%ivl(1.0)==0){ ring(b,dcnt(18),140,t*0.05,0,0); nway(b,3,150,30,1,40); } break;
+        if(t%ivl(1.0)==0){ ring(b,dcnt(18),140,t*0.05,0,0); nway(b,3,150,30,1,40); }
+        // ギミック：内側から湧く“引力弾”が外へ膨らみながら曲がる
+        if(t%ivl(1.8)==0){ int n=dcnt(12); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n+t*0.02; Bullet bb=mkB(b.x,b.y,a,bs(110),0,b.hue+30); bb.mode=4; bb.grav=Math.toRadians(0.45+diffIdx*0.2); } }
+        break;
       case C_CONCERTO:
         if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); arm(b,b.spinAng+Math.PI,150,0,0); b.spinAng+=Math.toRadians(12); }
         if(t%ivl(1.2)==0) ring(b,dcnt(16),150,t*0.045,2,30);
@@ -751,7 +755,10 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         break; }
       case C_TOTAL:
         if(t%ivl(1.1)==0){ ring(b,dcnt(14),140,t*0.04,0,0); nway(b,3,150,24,1,40); }
-        if(t%ivl(0.12)==0){ arm(b,b.spinAng,150,0,20); b.spinAng+=Math.toRadians(13);} break;
+        if(t%ivl(0.12)==0){ arm(b,b.spinAng,150,0,20); b.spinAng+=Math.toRadians(13);}
+        // ギミック：いったん展開して止まり、自機方向へ一斉発射する“溜め弾”
+        if(t%ivl(2.2)==0){ int n=dcnt(16); for(int i=0;i<n;i++){ double a=i*Math.PI*2/n; double bx=b.x+Math.cos(a)*64,by=b.y+Math.sin(a)*48; Bullet bb=mkB(bx,by,a,0,2,b.hue+50); bb.mode=1; bb.delay=(int)Math.round(0.55*60); bb.dsp=bs(165); } }
+        break;
       case C_LANTERN:{
         int layer=Math.min(5, 1 + t/300);   // 段階的に積む
         if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,0); b.spinAng+=Math.toRadians(13); }
@@ -760,6 +767,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         if(layer>=4 && t%ivl(1.4)==0) sweepWall(b,150,12,10);
         if(layer>=5 && t%ivl(1.0)==0){ int h=1+diffIdx; double aim=aimAt(b.x,b.y); for(int k=0;k<h;k++){ Bullet bb=mkB(b.x,b.y,aim+(k-h/2.0)*0.3,bs(120),1,b.hue+40); bb.mode=2; bb.homTurn=Math.toRadians(1.2); bb.homTime=130; } }
         break; }
+      case LUX_L2:
+        luxL2AllStages(b,t);
+        break;
     }
     // 棒立ち対策：純パターン（リング/螺旋）のボス＝ブルーム(1)・ヴォルテクス(2)のスペルにだけ
     // 「自機狙い」か「ばらまき」を混ぜる。エコー等の特殊弾幕は素の挙動を活かす（被せない）。
@@ -818,10 +828,10 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   }
 
   /* ====================================================================
-     ルナティック専用：L1 無敵耐久100秒 → L2 総ざらい
+     真ラスト：L1 無敵耐久50秒 → L2 全層代表スペル同時発動50秒
      ==================================================================== */
   void luxEnterL1(Boss b){
-    b.luxPhase=1; b.invincible=true; b.luxTimer=100*60; b.spell=true; b.spellName="ルクス「灯火の証明」";
+    b.luxPhase=1; b.invincible=true; b.luxTimer=50*60; b.spell=true; b.spellName="ルクス「灯火の証明」";
     b.declTimer=80; b.atkT=0; b.s1=0; bulletCancelToStars(); lasers.clear();
     startDialogue(LUNA_L1_INTRO, null);   // 会話後にL1継続（dialogueから戻る）
     sound.spellDeclare();
@@ -830,13 +840,13 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(b.declTimer>0){ b.declTimer--; return; }
     b.luxTimer--; b.atkT++;
     int sec = b.luxTimer/60;
-    int wave = sec>70?1 : sec>30?2 : 3;     // 100→70:第1波 70→30:第2波 30→0:第3波
+    int wave = sec>34?1 : sec>17?2 : 3;
     int t=b.atkT;
-    // 外周からの全方位
-    if(t%ivl(0.7)==0){ double ex=Math.random()*W; mkB(ex,-10,Math.PI/2+rr(-0.3,0.3),bs(150),0,b.hue); mkB(ex,H+10,-Math.PI/2+rr(-0.3,0.3),bs(150),0,b.hue); }
+    // 背後（画面下）からは出さず、上と左右からだけ流す
+    if(t%ivl(0.7)==0){ double ex=Math.random()*W; mkB(ex,-10,Math.PI/2+rr(-0.3,0.3),bs(150),0,b.hue); }
     if(t%ivl(0.7)==0){ double ey=Math.random()*H; mkB(-10,ey,rr(-0.3,0.3),bs(150),0,b.hue); mkB(W+10,ey,Math.PI+rr(-0.3,0.3),bs(150),0,b.hue); }
     if(wave>=2){
-      if(t%ivl(0.5)==0){ for(double[] c:new double[][]{{0,0},{W,0},{0,H},{W,H}}){ double a=Math.atan2(py-c[1],px-c[0]); mkB(c[0],c[1],a,bs(185),1,b.hue+30); } }
+      if(t%ivl(0.5)==0){ for(double[] c:new double[][]{{0,0},{W,0}}){ double a=Math.atan2(py-c[1],px-c[0]); mkB(c[0],c[1],a,bs(185),1,b.hue+30); } }
       if(t%ivl(0.10)==0){ arm(b,b.spinAng,150,0,20); arm(b,b.spinAng+Math.PI,150,0,20); b.spinAng+=Math.toRadians(11); }
     }
     if(wave>=3){
@@ -850,11 +860,44 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     }
   }
   Atk[] buildLuxL2Atks(){
-    // 全層の通常→スペルを層順でダイジェスト再演（持続短め）
-    List<Atk> a=new ArrayList<>();
-    for(BossInfo bi:BOSSES) for(Atk at:bi.atks) a.add(new Atk(at.spell, at.name, at.script, Math.max(8, at.sec*0.5)));
-    a.add(S("灯火回廊（最終）",C_LANTERN,40));
-    return a.toArray(new Atk[0]);
+    return new Atk[]{S("灯火回廊・全層共鳴",LUX_L2,50)};
+  }
+  void luxL2AllStages(Boss b,int t){
+    // 第1層「狙撃モード」
+    if(t%ivl(1.0)==0) nway(b,5,145,38,1,0);
+
+    // 第2層「螺旋花」
+    if(t%ivl(0.65)==0){
+      int n=dcnt(14); ring(b,n,135,b.spinAng,1,35);
+      b.spinAng+=Math.PI/n;
+    }
+
+    // 第3層「双子渦」
+    if(t%ivl(0.16)==0){
+      arm(b,b.spinAng,155,0,70); arm(b,b.spinAng+Math.PI,155,0,70);
+      b.spinAng+=Math.toRadians(9);
+    }
+
+    // 第4層「迷宮路」
+    if(t%ivl(2.2)==0){
+      int n=16, win=5, pos=(b.s1*4)%Math.max(1,n-win); b.s1++;
+      for(int i=0;i<n;i++) if(i<pos||i>=pos+win){
+        double bx=W*0.03+(W*0.94)*i/(n-1);
+        mkB(bx,-10,Math.PI/2,bs(115),0,b.hue+105);
+      }
+    }
+
+    // 第5層「追尾」
+    if(t%ivl(1.5)==0){
+      int h=2+diffIdx; double aim=aimAt(b.x,b.y);
+      for(int k=0;k<h;k++){
+        Bullet bb=mkB(b.x,b.y,aim+(k-(h-1)/2.0)*0.34,bs(115),1,b.hue+150);
+        bb.mode=2; bb.homTurn=Math.toRadians(1.0+diffIdx*0.25); bb.homTime=110;
+      }
+    }
+
+    // 第6層「灯の紋章」
+    shapeFormCollapse(b);
   }
 
   /* ====================================================================
@@ -1188,8 +1231,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         if(lv>=4){ mk(px-26,sy+10,-3.2,-15,3.5,d,false); mk(px+26,sy+10,3.2,-15,3.5,d,false); }
         if(lv>=5){ mk(px-34,sy+14,-4.6,-14,3.5,d,false); mk(px+34,sy+14,4.6,-14,3.5,d,false); }
         break; }
-      case 1: { // FORWARD 集束（さらに威力控えめ）
-        int d=(int)Math.round(5*m);
+      case 1: { // FORWARD 集束（拡散と同等DPSへ。全弾が当たる分、1発の威力は拡散より低め）
+        int d=(int)Math.round(4*m);
         mk(px,sy-6,0,-19,7,d,false);
         if(lv>=2){ mk(px-6,sy,0,-18,5,d,false); mk(px+6,sy,0,-18,5,d,false); }
         if(lv>=3){ mk(px-12,sy+4,0,-18,5,d,false); mk(px+12,sy+4,0,-18,5,d,false); }
@@ -2050,10 +2093,12 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(boss!=null && !boss.entering){
       g2.setFont(F_LBL); g2.setColor(new Color(255,120,150)); g2.drawString("◆ BOSS",sx,368);
       g2.setFont(F_SMALL); g2.setColor(new Color(220,230,250)); drawWrapped(g2,boss.name,sx,388,sw,15);
-      int total=boss.atks.length, remain=total-boss.atkIdx;
-      for(int i=0;i<total;i++){ g2.setColor(i<remain?(boss.cur().spell?new Color(255,90,120):new Color(120,170,255)):new Color(70,70,82));
+      int total=boss.atks.length, remain=Math.max(0,total-boss.atkIdx);
+      int ai=Math.max(0,Math.min(boss.atkIdx,total-1));   // luxPhase等でatkIdxが範囲外になっても安全に
+      for(int i=0;i<total;i++){ g2.setColor(i<remain?(boss.atks[ai].spell?new Color(255,90,120):new Color(120,170,255)):new Color(70,70,82));
         g2.fill(circle(sx+8+i*12,410,4)); }
-      if(boss.spell){ g2.setColor(hsb(boss.hue,0.5,1.0)); g2.setFont(F_LBL); drawWrapped(g2,boss.cur().name,sx,442,sw,20); }
+      if(boss.luxPhase>0){ g2.setColor(hsb(boss.hue,0.5,1.0)); g2.setFont(F_LBL); drawWrapped(g2,boss.spellName,sx,442,sw,20); }
+      else if(boss.spell){ g2.setColor(hsb(boss.hue,0.5,1.0)); g2.setFont(F_LBL); drawWrapped(g2,boss.atks[ai].name,sx,442,sw,20); }
       else { g2.setColor(new Color(150,170,200)); g2.setFont(F_SMALL); g2.drawString("― 通常弾幕 ―",sx,442); }
     }
     // 残響リワインド残量（R/C）
@@ -2410,8 +2455,8 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       g.boss.atkIdx=g.boss.atks.length-1; g.boss.invuln=0; g.boss.declTimer=0; g.bossTakeDamage(g.boss,9999999);  // 最終→撃破→L1突入
       if(g.state.equals("dialogue")){ for(int q=0;q<8 && g.state.equals("dialogue"); q++){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }
       int luxp = g.boss!=null? g.boss.luxPhase : -1;
-      for(int f=0; f<400; f++){ g.update(); if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }  // L1稼働
-      System.out.println("LUNA path: luxPhase(after L1 entry)="+luxp);
+      for(int f=0; f<400; f++){ g.update(); g.renderGame(g2); if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }  // L1稼働（描画もして例外検出）
+      System.out.println("LUNA path: luxPhase(after L1 entry)="+luxp+" state="+g.state);
       // Easy（クリーン）でも真ラストへ到達するか
       g.diffIdx=0; g.startNewGame(); g.echoUsed=false; g.continued=false; g.stageIndex=5; g.state="play"; g.stageRunner=null;
       g.boss=g.makeBoss(5); g.boss.entering=false; g.bossStartAtk(g.boss);

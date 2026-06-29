@@ -3,6 +3,10 @@
 /out/
 /灯火回廊.jar
 
+# リリース配布物（src非同梱の配布パッケージ。生成物なのでコミットしない）
+/灯火回廊-ASCENT-release/
+/灯火回廊-ASCENT-release.zip
+
 # macOS / エディタ
 .DS_Store
 
