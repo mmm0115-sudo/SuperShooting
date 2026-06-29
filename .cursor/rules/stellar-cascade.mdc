@@ -1,0 +1,31 @@
+---
+description: 灯火回廊（Stellar Cascade）Java 弾幕 STG の作業規約
+alwaysApply: true
+---
+
+# 灯火回廊 ― ASCENT
+
+Java（Swing/Java2D）縦スクロール弾幕 STG。外部依存なし。詳細は `CURSOR.md`。
+
+## 構成
+
+- `src/Main.java` → `game.StellarCascade`（God クラス、約2,450行）
+- `entity/` `bullet/` `util/` は **POJO のみ**（public フィールド）。ロジックは `StellarCascade`
+- ボス脚本: `runBossScript` / 攻撃定数 `AIM3`〜`C_LANTERN`
+- サウンド: `util/Sound.java`
+
+## ビルド・テスト（変更後必須）
+
+```bash
+javac -d out $(find src -name '*.java')
+java -Djava.awt.headless=true -cp out Main selftest
+```
+
+`TEST_OK` が出れば OK。jar は `.app/Contents/Resources/` に1個だけ。
+
+## 作業方針
+
+- `StellarCascade.java` 全文を読まない。grep → 必要箇所のみ read
+- 最小 diff。依頼外のリファクタ禁止
+- コメントは日本語 OK
+- 生成物（`out/`, `*.class`, ルート jar）はコミットしない

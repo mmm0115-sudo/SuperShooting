@@ -63,6 +63,8 @@ public class Sound {
   public void spellGet(){ tone(523,0.5,2,0.18,1.0); tone(659,0.5,2,0.16,1.0); tone(784,0.5,2,0.16,1.0); tone(1046,0.6,2,0.18,1.0); }
   public void rewind(){ tone(1400,0.18,2,0.18,0.5); tone(900,0.22,2,0.12,0.6); }   // ピンッ
   public boolean toggleMute(){ muted=!muted; return muted; }
+  public boolean isMuted(){ return muted; }
+  public void setVolume(double v){ volume=Math.max(0,Math.min(1.0,v)); }
   public void setSilent(boolean s){ muted=s; }
   public int addVolume(double d){ volume=Math.max(0,Math.min(1.0,volume+d)); if(volume>0) muted=false; return (int)Math.round(volume*100); }
   public int volPct(){ return (int)Math.round(volume*100); }

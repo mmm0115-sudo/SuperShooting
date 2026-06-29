@@ -558,7 +558,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       it.vy=-1.6-rng.nextDouble(); it.vx=rr(-1.5,1.5); it.r=5; items.add(it); }
     b.atkIdx++;
     if(b.atkIdx >= b.atks.length){
-      if(b.idx==5 && isLunatic() && clean() && b.luxPhase==0){ luxEnterL1(b); return; }   // 真ラストはノーリワインド＆ノーコンティニュー時のみ
+      if(b.idx==5 && clean() && b.luxPhase==0){ luxEnterL1(b); return; }   // 真ラストは難易度不問・ノーリワインド＆ノーコンティニュー時
       b.dead=true; b.deathTimer=0; onBossDefeated(); return;
     }
     bossStartAtk(b);
@@ -1188,9 +1188,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
         if(lv>=4){ mk(px-26,sy+10,-3.2,-15,3.5,d,false); mk(px+26,sy+10,3.2,-15,3.5,d,false); }
         if(lv>=5){ mk(px-34,sy+14,-4.6,-14,3.5,d,false); mk(px+34,sy+14,4.6,-14,3.5,d,false); }
         break; }
-      case 1: { // FORWARD 集束（威力控えめに調整）
-        int d=(int)Math.round(7*m);
-        mk(px,sy-6,0,-19,7,(int)Math.round(d*1.1),false);
+      case 1: { // FORWARD 集束（さらに威力控えめ）
+        int d=(int)Math.round(5*m);
+        mk(px,sy-6,0,-19,7,d,false);
         if(lv>=2){ mk(px-6,sy,0,-18,5,d,false); mk(px+6,sy,0,-18,5,d,false); }
         if(lv>=3){ mk(px-12,sy+4,0,-18,5,d,false); mk(px+12,sy+4,0,-18,5,d,false); }
         if(lv>=4){ mk(px-4,sy-2,-0.5,-18.5,5,d,false); mk(px+4,sy-2,0.5,-18.5,5,d,false); }
@@ -1289,9 +1289,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       if(boss.dead){
         if(boss.deathTimer%6==0) explosion(boss.x+rr(-40,40), boss.y+rr(-40,40), boss.hue, true);
         if(boss.deathTimer>120){
-          int bi=boss.idx; boss=null; lasers.clear(); enemyBullets.clear();
-          // 撃破後アウトロ会話 → 次の層へ
-          String[] out = (bi==5 && isLunatic())? LUNA_OUTRO : OUTRO[bi];
+          int bi=boss.idx; int lp=boss.luxPhase; boss=null; lasers.clear(); enemyBullets.clear();
+          // 撃破後アウトロ会話 → 次の層へ（LUNA_OUTROは真ラストL2完走時のみ）
+          String[] out = (bi==5 && lp>=2)? LUNA_OUTRO : OUTRO[bi];
           startDialogue(out, ()->{ state="stageclear"; transTimer=200; sound.stopBGM(); });
         }
       }
@@ -1422,11 +1422,9 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
      状態ディスパッチ
      ==================================================================== */
   void update(){
-    // 音量調節（どの画面でも -/[ で下げ、=/] で上げ）
-    if(just[KeyEvent.VK_EQUALS]||just[KeyEvent.VK_CLOSE_BRACKET]){ just[KeyEvent.VK_EQUALS]=just[KeyEvent.VK_CLOSE_BRACKET]=false; sound.init(); floatText(CX,60,"音量 "+sound.addVolume(0.1)+"%",60); }
-    if(just[KeyEvent.VK_MINUS]||just[KeyEvent.VK_OPEN_BRACKET]){ just[KeyEvent.VK_MINUS]=just[KeyEvent.VK_OPEN_BRACKET]=false; floatText(CX,60,"音量 "+sound.addVolume(-0.1)+"%",60); }
     switch(state){
       case "menu": updateMenu(); break;
+      case "settings": updateSettings(); break;
       case "records": updateRecords(); break;
       case "continue": updateContinue(); break;
       case "practice": updatePractice(); break;
@@ -1451,7 +1449,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   }
   void updateMenu(){
     frame++;
-    int nItems=6;
+    int nItems=7;
     if(actJust("up")){ menuSel=(menuSel+nItems-1)%nItems; sound.menu(); }
     else if(actJust("down")){ menuSel=(menuSel+1)%nItems; sound.menu(); }
     if(menuSel==1){ // モード
@@ -1469,9 +1467,19 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       else if(menuSel==1){ modeSel=(modeSel+1)%MODES.length; }
       else if(menuSel==2){ diffIdx=(diffIdx+1)%DIFFS.length; }
       else if(menuSel==3){ state="records"; recDiff=diffIdx; }
-      else if(menuSel==4) state="help";
+      else if(menuSel==4){ state="settings"; }
+      else if(menuSel==5) state="help";
       else { hiscore=0; saveHiscore(0); floatText(W/2,H-60,"HISCORE CLEARED",0); }
     }
+    clearJust();
+  }
+  // 設定画面：音量（保存される）
+  void updateSettings(){
+    frame++; sound.init();
+    if(actJust("left")){ sound.addVolume(-0.05); sound.menu(); }
+    else if(actJust("right")){ sound.addVolume(0.05); sound.menu(); }
+    if(actJust("mute")) sound.toggleMute();
+    if(actJust("pause")||actJust("confirm")||actJust("shot")){ saveRecords(); state="menu"; sound.menu(); }
     clearJust();
   }
   int recDiff=0; int practiceBoss=0, practiceAtk=0;
@@ -1619,6 +1627,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     switch(state){
       case "menu": drawMenu(g2); break;
       case "records": drawRecords(g2); break;
+      case "settings": drawSettings(g2); break;
       case "practice": drawPractice(g2); break;
       case "charselect": drawCharSelect(g2); break;
       case "dialogue": drawDialogue(g2); break;
@@ -1655,13 +1664,16 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   // 背景（グラデ＋星雲）はステージ毎に1回だけ生成してキャッシュ→毎フレームは転送のみ
   final HashMap<Integer,BufferedImage> bgCache = new HashMap<>();
   void drawBackground(Graphics2D g2,int idx){
-    g2.setColor(Color.BLACK); g2.fillRect(0,0,VW,H);     // 背景は真っ黒
-    // 流れる星（控えめ・速度の目印程度）
+    // 弾幕の色（=層の色）と被らないよう、補色寄り(+150°)の“暗く・低彩度”な層別背景
+    double bh = ((idx>=0&&idx<STAGE_INFO.length?STAGE_INFO[idx].bg:220) + 150) % 360;
+    g2.setPaint(new GradientPaint(0,0, hsb(bh,0.38,0.055), 0,H, hsb((bh+25)%360,0.42,0.10)));
+    g2.fillRect(0,0,VW,H);
+    // 流れる星（控えめ・速度の目印程度／背景になじむ寒色）
     for(Star st:stars){
       st.y += st.z*(1.4+idx*0.15);
       if(st.y>H){ st.y=-2; st.x=Math.random()*VW; }
-      int a=(int)(40+st.z*22);
-      g2.setColor(new Color(120,130,150,a));
+      int a=(int)(35+st.z*20);
+      g2.setColor(hsba(bh,0.25,0.7,a));
       g2.fillRect((int)st.x,(int)st.y,(int)st.s,(int)st.s);
     }
   }
@@ -2104,7 +2116,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     g2.setColor(new Color(190,175,160)); g2.setFont(gothic(16,false));
     centerStr(g2,"放棄ステーション「回廊」を、下層から最上層へ",CX,330);
 
-    String[] labels={"ゲームスタート","モード:  "+MODES[modeSel],"難易度:  "+diff().name,"記録","遊び方","ハイスコア消去"};
+    String[] labels={"ゲームスタート","モード:  "+MODES[modeSel],"難易度:  "+diff().name,"記録","設定","遊び方","ハイスコア消去"};
     for(int i=0;i<labels.length;i++){
       boolean sel=i==menuSel;
       g2.setFont(new Font("SansSerif", sel?Font.BOLD:Font.PLAIN, sel?26:20));
@@ -2115,10 +2127,25 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     }
     g2.setColor(new Color(95,127,174)); g2.setFont(new Font("SansSerif",Font.PLAIN,13));
     centerStr(g2,"移動: 方向キー / WASD    ショット: Z / Space    ボム: X",CX,H-110);
-    centerStr(g2,"低速: Shift    ポーズ: P    ミュート: M    残響: R/C    音量: - / =",CX,H-88);
+    centerStr(g2,"低速: Shift    ポーズ: P    ミュート: M    残響リワインド: R / C",CX,H-88);
     g2.setColor(new Color(58,86,127)); g2.setFont(new Font("SansSerif",Font.PLAIN,12));
     centerStr(g2,"HI-SCORE  "+pad(hiscore,8),CX,H-52);
     centerStr(g2,"全6層・各層に中ボスとボス／通常↔スペル交互の手作り弾幕",CX,H-30);
+  }
+  void drawSettings(Graphics2D g2){
+    g2.setColor(new Color(8,8,18)); g2.fillRect(0,0,VW,H);
+    g2.setColor(new Color(255,200,120)); g2.setFont(mincho(34)); centerStr(g2,"設定",CX,140);
+    // 音量バー
+    int vp=sound.volPct(); boolean muted=sound.isMuted();
+    g2.setColor(new Color(200,210,240)); g2.setFont(gothic(20,true)); centerStr(g2,"音量",CX,250);
+    int bx=CX-160, by=275, bw=320;
+    g2.setColor(new Color(60,60,80)); g2.fill(new Rectangle2D.Double(bx,by,bw,16));
+    g2.setColor(muted? new Color(120,120,140) : new Color(255,170,80)); g2.fill(new Rectangle2D.Double(bx,by,bw*vp/100.0,16));
+    g2.setColor(new Color(255,255,255,120)); g2.setStroke(new BasicStroke(1f)); g2.draw(new Rectangle2D.Double(bx,by,bw,16));
+    g2.setColor(Color.WHITE); g2.setFont(new Font("Monospaced",Font.BOLD,20)); centerStr(g2, muted?"MUTE":(vp+"%"), CX, by+50);
+    g2.setColor(new Color(160,175,210)); g2.setFont(gothic(15,false));
+    centerStr(g2,"←→ 音量調節    M ミュート切替",CX,by+95);
+    centerStr(g2,"Z / Esc で保存して戻る（設定は次回も保持）",CX,by+125);
   }
   void drawRecords(Graphics2D g2){
     g2.setColor(new Color(8,8,18)); g2.fillRect(0,0,VW,H);
@@ -2229,8 +2256,6 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     g2.setColor(Color.WHITE); g2.setFont(new Font("SansSerif",Font.BOLD,48)); centerStr(g2,"PAUSE",CX,H/2-20);
     g2.setColor(new Color(159,200,255)); g2.setFont(new Font("SansSerif",Font.PLAIN,18));
     centerStr(g2,"P / Esc で再開　　Q でタイトルへ",CX,H/2+30);
-    g2.setColor(new Color(150,170,200)); g2.setFont(new Font("SansSerif",Font.PLAIN,15));
-    centerStr(g2,"音量: - / =  （現在 "+sound.volPct()+"%）　　M: ミュート",CX,H/2+64);
   }
   void drawStageClear(Graphics2D g2){
     g2.setColor(new Color(0,0,10,140)); g2.fillRect(0,0,VW,H);
@@ -2300,12 +2325,14 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
   void loadRecords(){
     try(BufferedReader r=new BufferedReader(new FileReader(recFile()))){
       String ln; while((ln=r.readLine())!=null){ String[] a=ln.split("\\t");
+        if(a.length>=2 && a[0].equals("V")){ sound.setVolume(Double.parseDouble(a[1])); continue; }
         if(a.length>=3){ if(a[0].equals("T")) bestTime.put(a[1],Double.parseDouble(a[2]));
           else if(a[0].equals("S")) bestScore.put(a[1],Integer.parseInt(a[2])); } }
     }catch(Exception e){}
   }
   void saveRecords(){
     try(FileWriter w=new FileWriter(recFile())){
+      w.write("V\t"+sound.volume+"\n");                       // 音量設定を保存
       for(var en:bestTime.entrySet())  w.write("T\t"+en.getKey()+"\t"+en.getValue()+"\n");
       for(var en:bestScore.entrySet()) w.write("S\t"+en.getKey()+"\t"+en.getValue()+"\n");
     }catch(Exception e){}
@@ -2385,6 +2412,25 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       int luxp = g.boss!=null? g.boss.luxPhase : -1;
       for(int f=0; f<400; f++){ g.update(); if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }  // L1稼働
       System.out.println("LUNA path: luxPhase(after L1 entry)="+luxp);
+      // Easy（クリーン）でも真ラストへ到達するか
+      g.diffIdx=0; g.startNewGame(); g.echoUsed=false; g.continued=false; g.stageIndex=5; g.state="play"; g.stageRunner=null;
+      g.boss=g.makeBoss(5); g.boss.entering=false; g.bossStartAtk(g.boss);
+      int lastAtk=-1;
+      for(int q=0;q<200 && g.boss!=null && g.boss.luxPhase==0 && !g.boss.dead; q++){
+        lastAtk=g.boss.atkIdx; g.boss.invuln=0; g.boss.declTimer=0; g.bossTakeDamage(g.boss,9999999);
+        if(g.state.equals("dialogue")) for(int z=0;z<8&&g.state.equals("dialogue");z++){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); }
+      }
+      int eluxp = g.boss!=null? g.boss.luxPhase : -2;
+      System.out.println("EASY last-spell: reachedAtkMax="+lastAtk+" luxPhase="+eluxp+(eluxp==1?" OK(真ラスト到達)":" "));
+      // 残響リワインドを使うと真ラストは出ない（クリーン＝ノーリワインド＆ノーコンティニュー必須）
+      g.diffIdx=3; g.startNewGame(); g.echoUsed=true; g.continued=false;
+      g.stageIndex=5; g.state="play"; g.stageRunner=null;
+      g.boss=g.makeBoss(5); g.boss.entering=false;
+      g.boss.atkIdx=g.boss.atks.length-1; g.bossStartAtk(g.boss);
+      g.boss.invuln=0; g.boss.declTimer=0; g.bossTakeDamage(g.boss,9999999);
+      int luxEcho = g.boss!=null? g.boss.luxPhase : -1;
+      System.out.println("ECHO blocks finale: luxPhase="+luxEcho+(luxEcho==0?" OK(残響使用→真ラスト無し)":" FAIL"));
+      if(luxEcho!=0) throw new RuntimeException("finale should be blocked when echoUsed");
       // 全機体 × 全ショット（誘導弾含む）を発射 → 命中処理まで
       g.power=99;
       for(int cs=0; cs<CHARS.length; cs++){ for(int ss=0; ss<SHOT_NAMES.length; ss++){
