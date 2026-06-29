@@ -578,6 +578,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(b.luxPhase==1){ luxL1(b); return; }
     if(b.declTimer>0){ b.declTimer--; if(b.declTimer==0 && !b.spell){} return; }  // 宣言中は撃たない
     b.atkT++;
+    if(b.luxPhase==2) b.luxTimer=Math.max(0,b.timeLimit-b.atkT);
     runBossScript(b);
     // 基本はHPを削り切って進行。真ラストL2だけは設定どおり50秒、それ以外は45秒を上限にする。
     int timeout = b.luxPhase==2 ? b.timeLimit : 45*60;
@@ -854,7 +855,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       if(t%ivl(1.1)==0) sweepWall(b,170,15,0);
     }
     if(b.luxTimer<=0){ // L2 へ
-      b.luxPhase=2; b.invincible=false; b.dead=false;
+      b.luxPhase=2; b.invincible=true; b.dead=false; b.luxTimer=50*60;
       b.atks = buildLuxL2Atks(); b.atkIdx=0; b.totalHp=(int)Math.round(BOSSES[5].hp*1.4); b.segHp=Math.max(1,b.totalHp/b.atks.length);
       startDialogue(LUNA_L2_INTRO, ()->bossStartAtk(b));
     }
@@ -1127,6 +1128,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     if(boss!=null) boss.captured=false;   // 被弾でスペルカード捕獲失敗
   }
   void respawnOrGameOver(){
+    if(boss!=null && boss.luxPhase>0){ resetPlayer(); bombs=Math.max(bombs,2); return; }  // 真ラスト中は残機無限
     if(lives>0){ lives--; resetPlayer(); bombs=Math.max(bombs,2); return; }
     if(endlessMode){   // 無限：コンティニュー無し→記録保存してゲームオーバー
       state="gameover"; transTimer=0; saveHiIfNeeded(); sound.stopBGM();
@@ -2080,8 +2082,12 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
     g2.setFont(F_NUM); g2.setColor(Color.WHITE); g2.drawString(pad(score,8),sx,134);
     g2.setFont(F_SMALL); g2.setColor(new Color(127,168,216)); g2.drawString("HI "+pad(hiscore,8),sx,154);
     g2.setFont(F_LBL); g2.setColor(new Color(159,255,207)); g2.drawString("PLAYER",sx,190);
-    for(int i=0;i<lives;i++){ g2.setColor(new Color(207,239,255)); double bx=sx+12+i*18, by=204;
-      g2.fill(poly(new double[]{bx,bx+6,bx-6}, new double[]{by-7,by+6,by+6})); }
+    if(boss!=null && boss.luxPhase>0){
+      g2.setColor(new Color(207,239,255)); g2.setFont(F_NUM); g2.drawString("∞",sx+8,210);
+    } else {
+      for(int i=0;i<lives;i++){ g2.setColor(new Color(207,239,255)); double bx=sx+12+i*18, by=204;
+        g2.fill(poly(new double[]{bx,bx+6,bx-6}, new double[]{by-7,by+6,by+6})); }
+    }
     g2.setFont(F_LBL); g2.setColor(new Color(159,227,255)); g2.drawString("BOMB",sx,232);
     for(int i=0;i<bombs;i++){ g2.setColor(hsb(180,0.9,0.6)); g2.fill(circle(sx+14+i*16,244,5)); }
     int lv=shotLevel();
@@ -2449,7 +2455,7 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
           }
         }
       }
-      // ルナ最終ボスの L1(無敵耐久)→L2(総ざらい) 経路
+      // 真ラストの L1(無敵耐久)→L2(全層同時耐久) 経路
       g.diffIdx=3; g.startNewGame(); g.stageIndex=5; g.state="play"; g.stageRunner=null;
       g.boss=g.makeBoss(5); g.boss.entering=false; g.bossStartAtk(g.boss);
       g.boss.atkIdx=g.boss.atks.length-1; g.boss.invuln=0; g.boss.declTimer=0; g.bossTakeDamage(g.boss,9999999);  // 最終→撃破→L1突入
@@ -2457,6 +2463,12 @@ public class StellarCascade extends JPanel implements ActionListener, KeyListene
       int luxp = g.boss!=null? g.boss.luxPhase : -1;
       for(int f=0; f<400; f++){ g.update(); g.renderGame(g2); if(g.state.equals("dialogue")){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); } }  // L1稼働（描画もして例外検出）
       System.out.println("LUNA path: luxPhase(after L1 entry)="+luxp+" state="+g.state);
+      g.boss.luxTimer=1; g.update();  // L2へ即時遷移
+      if(g.state.equals("dialogue")) for(int z=0;z<8&&g.state.equals("dialogue");z++){ g.just[KeyEvent.VK_Z]=true; g.updateDialogue(); }
+      if(g.boss==null || g.boss.luxPhase!=2 || !g.boss.invincible || g.boss.timeLimit!=50*60) throw new RuntimeException("L2 endurance setup failed");
+      g.lives=0; g.pDead=true; g.pDeathTimer=61; g.updatePlayer();
+      if(g.pDead || g.lives!=0 || !g.state.equals("play")) throw new RuntimeException("finale infinite lives failed");
+      System.out.println("FINALE test: L2 invincible="+g.boss.invincible+" time="+g.boss.timeLimit/60+"s lives=INFINITE OK");
       // Easy（クリーン）でも真ラストへ到達するか
       g.diffIdx=0; g.startNewGame(); g.echoUsed=false; g.continued=false; g.stageIndex=5; g.state="play"; g.stageRunner=null;
       g.boss=g.makeBoss(5); g.boss.entering=false; g.bossStartAtk(g.boss);
